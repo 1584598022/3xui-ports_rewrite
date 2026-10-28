@@ -210,14 +210,32 @@ if all_foreign:
                 xui_inbound = o.get("inbound_info")
                 break
     
-    def find_free_port(start=20001):
-        for port_c in range(start, 65535):
+    def get_random_free_port(min_p=20000, max_p=55000):
+        import random
+        used_db_ports = set()
+        if os.path.exists(xui_db):
+            try:
+                conn = sqlite3.connect(xui_db)
+                c = conn.cursor()
+                c.execute("SELECT port FROM inbounds")
+                for r in c.fetchall():
+                    if r[0]:
+                        used_db_ports.add(int(r[0]))
+                conn.close()
+            except Exception:
+                pass
+
+        for _ in range(100):
+            candidate = random.randint(min_p, max_p)
+            if candidate in used_db_ports:
+                continue
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                if s.connect_ex(('127.0.0.1', port_c)) != 0:
-                    return port_c
+                s.settimeout(0.2)
+                if s.connect_ex(('127.0.0.1', candidate)) != 0:
+                    return candidate
         return 20443
 
-    free_p = find_free_port(20001)
+    free_p = get_random_free_port()
 
     print(json.dumps({
         "status": "CONFLICT",
