@@ -1073,7 +1073,7 @@ else
 
     LOCATION_BLOCK="    # 3X-UI WebSocket 反向代理 (${WS_PATH})
     location ${WS_PATH} {
-        if (\$http_upgrade != \"websocket\") {
+        if (\$http_upgrade !~* \"websocket\") {
             return 404;
         }
         proxy_redirect off;
@@ -1125,8 +1125,8 @@ PYEOF
 
     SELF_CONF="/etc/nginx/conf.d/xui_${DOMAIN}_${EXTERNAL_PORT}.conf"
 
-    if [ -n "$TARGET_CONF" ] && [ -f "$TARGET_CONF" ] && [ "$TARGET_CONF" != "$SELF_CONF" ]; then
-        echo -e "${CYAN}[提示] 检测到现有网站配置文件: ${TARGET_CONF}，正在更新/追加分流规则...${PLAIN}"
+    if [ -n "$TARGET_CONF" ] && [ -f "$TARGET_CONF" ]; then
+        echo -e "${CYAN}[提示] 检测到现有配置文件: ${TARGET_CONF}，正在更新/追加分流规则...${PLAIN}"
         python3 - << PYEOF
 import re
 
