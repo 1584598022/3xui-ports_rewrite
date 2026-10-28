@@ -1056,31 +1056,8 @@ BEGIN
 END;
 """)
 
-c.execute("""
-CREATE TRIGGER IF NOT EXISTS trg_sync_stream_settings_to_hosts
-AFTER UPDATE OF stream_settings ON inbounds
-FOR EACH ROW
-WHEN json_extract(NEW.stream_settings, '$.externalProxy[0].dest') IS NOT NULL
-  AND json_extract(NEW.stream_settings, '$.externalProxy[0].dest') != ''
-BEGIN
-    UPDATE hosts
-    SET address = json_extract(NEW.stream_settings, '$.externalProxy[0].dest'),
-        port = COALESCE(json_extract(NEW.stream_settings, '$.externalProxy[0].port'), port),
-        sni = COALESCE(json_extract(NEW.stream_settings, '$.externalProxy[0].sni'), sni)
-    WHERE inbound_id = NEW.id
-      AND (
-          address != json_extract(NEW.stream_settings, '$.externalProxy[0].dest')
-          OR (json_extract(NEW.stream_settings, '$.externalProxy[0].port') IS NOT NULL AND port != json_extract(NEW.stream_settings, '$.externalProxy[0].port'))
-          OR (json_extract(NEW.stream_settings, '$.externalProxy[0].sni') IS NOT NULL AND sni != json_extract(NEW.stream_settings, '$.externalProxy[0].sni'))
-      );
-
-    UPDATE inbounds
-    SET share_addr = json_extract(NEW.stream_settings, '$.externalProxy[0].dest'),
-        share_addr_strategy = 'custom'
-    WHERE id = NEW.id
-      AND (share_addr != json_extract(NEW.stream_settings, '$.externalProxy[0].dest') OR share_addr_strategy != 'custom');
-END;
-""")
+# 清理旧版可能残留的流配置向主机反向覆盖触发器，避免主控与从节点发生乒乓竞态覆盖
+c.execute("DROP TRIGGER IF EXISTS trg_sync_stream_settings_to_hosts")
 
 conn.commit()
 conn.close()
