@@ -942,6 +942,24 @@ if not custom_share and stream_settings.get("externalProxy"):
             custom_share = dest.strip()
             break
 
+import ipaddress
+
+def is_ip(addr):
+    try:
+        ipaddress.ip_address(addr.strip())
+        return True
+    except Exception:
+        return False
+
+# 智能识别输入的是域名还是纯 IP
+is_target_ip = is_ip("$DOMAIN")
+
+# RFC 6066 规范：严禁字面量 IP 出现在 TLS SNI 扩展中
+# - 纯 IP 证书方案：SNI 保持为空，由服务端 default_server 证书通过 SAN 进行握手，避免产生畸形握手包和异常流量指纹
+# - 域名方案（反代/CDN优选）：SNI 坚决锁定为域名，彻底杜绝被 CDN 优选 IP 覆盖导致握手失败
+target_sni = "" if is_target_ip else "$DOMAIN"
+target_host = "" if is_target_ip else "$DOMAIN"
+
 effective_addr = custom_share if custom_share else "$DOMAIN"
 
 with open("/tmp/xui_effective_addr.txt", "w") as f:
@@ -951,7 +969,13 @@ if custom_share:
     print(f"\033[0;32m[智能继承] 检测到自定义分享地址: {custom_share}，已保留为客户端连接地址 (Address)\033[0m")
     c.execute("UPDATE inbounds SET share_addr_strategy = 'custom', share_addr = ? WHERE id = ?", (custom_share, inbound_id))
 else:
-    print(f"\033[0;36m[配置同步] 节点连接地址 (Address) 采用反代域名: $DOMAIN\033[0m")
+    addr_type = "公网 IP" if is_target_ip else "反代域名"
+    print(f"\033[0;36m[配置同步] 节点连接地址 (Address) 采用{addr_type}: $DOMAIN\033[0m")
+
+if not is_target_ip:
+    print(f"\033[0;36m[SNI 锁定] 识别到域名方案，锁定 SNI 为: $DOMAIN (彻底防止 CDN 优选 IP 污染)\033[0m")
+else:
+    print(f"\033[0;33m[RFC 规范] 识别到纯 IP 方案，SNI 保持为空 (符合 RFC 6066 规范，消除畸形指纹)\033[0m")
 
 # 3. 写入 externalProxy (保证网页控制面板“复制链接/二维码/API”导出端口与 SNI 正确)
 stream_settings["externalProxy"] = [
@@ -959,7 +983,7 @@ stream_settings["externalProxy"] = [
         "dest": effective_addr,
         "port": int("$EXTERNAL_PORT"),
         "forceTls": "same",
-        "sni": "$DOMAIN",
+        "sni": target_sni,
         "remark": ""
     }
 ]
@@ -974,7 +998,7 @@ if host_row:
             address = ?, port = ?, path = ?, sni = ?, host_header = ?,
             security = 'same', updated_at = ?
         WHERE inbound_id = ?
-    """, (effective_addr, int("$EXTERNAL_PORT"), "$WS_PATH", "$DOMAIN", "$DOMAIN", now, inbound_id))
+    """, (effective_addr, int("$EXTERNAL_PORT"), "$WS_PATH", target_sni, target_host, now, inbound_id))
     print(f"\033[0;32m[OK] 已同步更新主机映射表 (Hosts ID: {host_row[0]})\033[0m")
 else:
     gid = str(uuid.uuid4())
@@ -986,7 +1010,7 @@ else:
             ?, ?, 0, ?, 0, 0,
             ?, ?, 'same', ?, ?, ?, ?, ?
         )
-    """, (gid, inbound_id, f"Auto_{inbound_id}", effective_addr, int("$EXTERNAL_PORT"), "$DOMAIN", "$DOMAIN", "$WS_PATH", now, now))
+    """, (gid, inbound_id, f"Auto_{inbound_id}", effective_addr, int("$EXTERNAL_PORT"), target_sni, target_host, "$WS_PATH", now, now))
     print(f"\033[0;32m[OK] 已新建主机映射记录 (Hosts)\033[0m")
 
 # 5. 安装双向联动触发器，保证后续在【主机】或【入站】任意一处改动地址，入站导出与订阅始终 100% 实时同步
