@@ -43,9 +43,8 @@
 在任意已安装 3X-UI 的 Linux VPS 上以 `root` 用户运行：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/daocaoren/3x-ui-proxy/main/xui.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/1584598022/3xui-ports_rewrite/main/xui.sh)
 ```
-*(注：请将链接中的用户名和仓库名替换为你自己的 GitHub 仓库地址)*
 
 备用快速镜像链接：
 ```bash
