@@ -46,11 +46,6 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/1584598022/3xui-ports_rewrite/main/xui.sh)
 ```
 
-备用快速镜像链接：
-```bash
-bash <(curl -fsSL https://uk.daocaoren.pp.ua/xui.sh)
-```
-
 ---
 
 ## 🖥️ 交互流程说明
