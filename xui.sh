@@ -249,6 +249,8 @@ if all_foreign:
                 pass
 
         blocked_ranges = get_iptables_blocked_ranges()
+        hopping_ranges = [f"{s}-{e}" for s, e in blocked_ranges if e > s]
+        hopping_desc = ", ".join(hopping_ranges[:2]) if hopping_ranges else ""
 
         for _ in range(300):
             candidate = random.randint(min_p, max_p)
@@ -260,16 +262,17 @@ if all_foreign:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.settimeout(0.1)
                 if s.connect_ex(('127.0.0.1', candidate)) != 0:
-                    return candidate
-        return 60999
+                    return candidate, hopping_desc
+        return 60999, hopping_desc
 
-    free_p = get_random_free_port()
+    free_p, hopping_desc = get_random_free_port()
 
     print(json.dumps({
         "status": "CONFLICT",
         "is_xui": is_xui_conflict,
         "xui_inbound": xui_inbound,
         "suggested_free_port": free_p,
+        "hopping_desc": hopping_desc,
         "foreign": all_foreign
     }))
 else:
@@ -290,6 +293,12 @@ PYEOF
             IS_WS=$(python3 -c "import json; print('1' if json.loads('''$PORT_CHECK_RESULT''').get('xui_inbound', {}).get('is_ws') else '0')")
             INBOUND_NET=$(python3 -c "import json; print(json.loads('''$PORT_CHECK_RESULT''').get('xui_inbound', {}).get('network') or 'tcp')")
             INBOUND_SEC=$(python3 -c "import json; print(json.loads('''$PORT_CHECK_RESULT''').get('xui_inbound', {}).get('security') or 'none')")
+            HOPPING_DESC=$(python3 -c "import json; print(json.loads('''$PORT_CHECK_RESULT''').get('hopping_desc') or '')")
+
+            PORT_HINT="(自动分配空闲端口，推荐: ${SUGG_FREE_PORT})"
+            if [ -n "$HOPPING_DESC" ]; then
+                PORT_HINT="(已避开跳跃区间 ${HOPPING_DESC}，推荐: ${SUGG_FREE_PORT})"
+            fi
 
             echo -e "\n${YELLOW}====================================================${PLAIN}"
             echo -e "${YELLOW}           [ 3X-UI 入站端口占用提醒 ]                 ${PLAIN}"
@@ -307,7 +316,7 @@ PYEOF
             echo -e "${YELLOW}====================================================${PLAIN}"
 
             echo -e "请选择处理方式："
-            echo -e "  ${GREEN}1) 将冲突入站修改为高位端口 (避开已有入站及 Hy2 端口跳跃区间，推荐: ${SUGG_FREE_PORT})${PLAIN}"
+            echo -e "  ${GREEN}1) 将冲突入站修改为高位端口 ${PORT_HINT}${PLAIN}"
             echo -e "  ${CYAN}2) 本次分流改用其他对外映射端口 (例如 8443, 2096 等，保留原入站不变)${PLAIN}"
             echo -e "  ${RED}3) 放弃并退出${PLAIN}"
 
