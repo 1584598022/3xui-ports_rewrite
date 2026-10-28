@@ -66,9 +66,9 @@ if [ -z "$DOMAIN" ]; then
     exit 1
 fi
 
-read -p "2. 3X-UI 入站的内部监听端口 (例如 60231): " XUI_PORT
+read -p "2. 3X-UI 入站端口 (例如 60231): " XUI_PORT
 if [ -z "$XUI_PORT" ]; then
-    echo -e "${RED}[错误] 内部端口不能为空！${PLAIN}"
+    echo -e "${RED}[错误] 3X-UI 入站端口不能为空！${PLAIN}"
     exit 1
 fi
 
@@ -856,7 +856,7 @@ echo -e "Web 服务器类型:       ${CYAN}${WEB_SERVER^^}${PLAIN}"
 echo -e "节点域名 (Address):   ${CYAN}${DOMAIN}${PLAIN}"
 echo -e "对外端口 (Port):      ${CYAN}${EXTERNAL_PORT}${PLAIN}"
 echo -e "分流路径 (Path):      ${CYAN}${WS_PATH}${PLAIN}"
-echo -e "3X-UI 底层端口:       ${CYAN}${XUI_PORT}${PLAIN}"
+echo -e "3X-UI 入站端口:       ${CYAN}${XUI_PORT}${PLAIN}"
 echo -e "订阅与面板状态:       ${GREEN}已自动双重映射为 ${EXTERNAL_PORT} 端口${PLAIN}"
 echo -e "Web 配置文件:         ${CYAN}${TARGET_CONF}${PLAIN}"
 echo -e "${GREEN}====================================================${PLAIN}"

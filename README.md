@@ -1,6 +1,6 @@
 # 3xui-ports_rewrite
 
-3X-UI 端口复用与订阅重写脚本。自动识别 Nginx / Caddy 环境，将 3X-UI 的 VLESS+WS+TLS 高位监听端口反代到 443 或自定义端口，并同步更新 3X-UI 内部数据库的订阅导出端口。
+3X-UI 端口复用与订阅重写脚本。自动识别 Nginx / Caddy 环境，将 3X-UI 的 VLESS+WS+TLS 入站端口反代到 443 或自定义端口，并同步更新 3X-UI 内部数据库的订阅导出端口。
 
 ## 功能
 
@@ -17,13 +17,13 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/1584598022/3xui-ports_rewrite/main/xui.sh)
 ```
 
-按照提示输入域名、内部端口、对外端口及分流路径即可。
+按照提示输入域名、3X-UI 入站端口、对外端口及分流路径即可。
 
 ## 原理
 
 ```text
 客户端 (HTTPS 443/8443) ---> Web 反代 (Nginx / Caddy)
-                                  |-- /vless-ws*  --->  3X-UI (内部监听端口)
+                                  |-- /vless-ws*  --->  3X-UI (入站端口)
                                   \-- 其它路径    --->  本地现有网站/服务
 ```
 
