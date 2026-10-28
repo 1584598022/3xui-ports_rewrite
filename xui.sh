@@ -8,6 +8,7 @@
 # 3. 智能默认路径：同一端口已被占用时，按回车自动顺延分配可用路径 (如 /vless-ws2)
 # 4. 深度冲突拦截：防止误覆盖导致已有节点断连 (同时检测 3X-UI、Nginx、Caddy)
 # 5. 订阅双重重写：Hosts 表 + externalProxy 双重生效，API/面板/订阅均输出自定义端口
+# 6. 智能继承分享地址：自动识别并保留自定义分享地址 (优选IP/域名)，保持SNI/Host为反代域名
 # ==============================================================================
 
 set -e
@@ -87,32 +88,55 @@ if [ "$INBOUND_EXISTS" != "1" ]; then
     exit 1
 fi
 
-# 自动读取该入站的协议、TLS 状态与已有证书信息
+# 自动读取该入站的协议、TLS 状态与已有证书信息，及是否配置自定义分享地址
 INBOUND_INFO=$(python3 - << PYEOF
 import sqlite3, json
 
 conn = sqlite3.connect('$XUI_DB')
 c = conn.cursor()
-c.execute('SELECT protocol, stream_settings FROM inbounds WHERE port = ?', ($XUI_PORT,))
+c.execute('SELECT id, protocol, stream_settings, share_addr_strategy, share_addr FROM inbounds WHERE port = ?', ($XUI_PORT,))
 row = c.fetchone()
-conn.close()
 
-protocol = row[0] if row else "vless"
+protocol = row[1] if row else "vless"
 security = "none"
 cert_f = ""
 key_f = ""
 ws_path = ""
+share_addr = ""
 
-if row and row[1]:
-    ss = json.loads(row[1])
-    security = ss.get("security", "none")
-    certs = ss.get("tlsSettings", {}).get("certificates", [])
-    if certs:
-        cert_f = certs[0].get("certificateFile", "")
-        key_f = certs[0].get("keyFile", "")
-    ws_path = ss.get("wsSettings", {}).get("path", "")
+if row:
+    inbound_id = row[0]
+    strategy = row[3] if len(row) > 3 else "node"
+    s_addr = row[4] if len(row) > 4 else ""
+    if strategy == "custom" and s_addr and s_addr.strip():
+        share_addr = s_addr.strip()
+    
+    try:
+        c.execute("SELECT address FROM hosts WHERE inbound_id = ?", (inbound_id,))
+        h_row = c.fetchone()
+        if not share_addr and h_row and h_row[0] and h_row[0].strip() and h_row[0].strip() != "$DOMAIN":
+            share_addr = h_row[0].strip()
+    except Exception:
+        pass
 
-print(f"{protocol}@@@{security}@@@{cert_f}@@@{key_f}@@@{ws_path}")
+    if row[2]:
+        ss = json.loads(row[2])
+        security = ss.get("security", "none")
+        certs = ss.get("tlsSettings", {}).get("certificates", [])
+        if certs:
+            cert_f = certs[0].get("certificateFile", "")
+            key_f = certs[0].get("keyFile", "")
+        ws_path = ss.get("wsSettings", {}).get("path", "")
+        if not share_addr:
+            for ep in ss.get("externalProxy", []):
+                dest = ep.get("dest", "")
+                if dest and dest.strip() and dest.strip() != "$DOMAIN":
+                    share_addr = dest.strip()
+                    break
+
+conn.close()
+
+print(f"{protocol}@@@{security}@@@{cert_f}@@@{key_f}@@@{ws_path}@@@{share_addr}")
 PYEOF
 )
 
@@ -121,6 +145,12 @@ INBOUND_SECURITY=$(echo "$INBOUND_INFO" | awk -F'@@@' '{print $2}')
 DB_CERT=$(echo "$INBOUND_INFO" | awk -F'@@@' '{print $3}')
 DB_KEY=$(echo "$INBOUND_INFO" | awk -F'@@@' '{print $4}')
 EXISTING_PATH=$(echo "$INBOUND_INFO" | awk -F'@@@' '{print $5}')
+INBOUND_SHARE_ADDR=$(echo "$INBOUND_INFO" | awk -F'@@@' '{print $6}')
+
+if [ -n "$INBOUND_SHARE_ADDR" ] && [ "$INBOUND_SHARE_ADDR" != "$DOMAIN" ]; then
+    echo -e "${GREEN}[智能识别] 检测到该入站已配置自定义分享地址: ${CYAN}${INBOUND_SHARE_ADDR}${PLAIN}"
+    echo -e "${GREEN}          (后续将自动保留为客户端连接地址，反代域名作为 SNI/Host)${PLAIN}"
+fi
 
 read -p "3. 对外自定义映射端口 [默认: 443]: " EXTERNAL_PORT
 EXTERNAL_PORT=${EXTERNAL_PORT:-443}
@@ -458,7 +488,7 @@ if os.path.exists(db_path):
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
     try:
-        c.execute("SELECT inbound_id, path FROM hosts WHERE address = ? AND port = ?", (domain, ext_port))
+        c.execute("SELECT inbound_id, path FROM hosts WHERE (address = ? OR sni = ? OR host_header = ?) AND port = ?", (domain, domain, domain, ext_port))
         for r in c.fetchall():
             in_id, path = r[0], r[1]
             c.execute("SELECT port FROM inbounds WHERE id = ?", (in_id,))
@@ -581,7 +611,7 @@ if os.path.exists(db_path):
     
     # 检查 hosts 表
     try:
-        c.execute("SELECT inbound_id, address, port, path FROM hosts WHERE address = ? AND port = ? AND path = ?", (domain, ext_port, ws_path))
+        c.execute("SELECT inbound_id, address, port, path FROM hosts WHERE (address = ? OR sni = ? OR host_header = ?) AND port = ? AND path = ?", (domain, domain, domain, ext_port, ws_path))
         for row in c.fetchall():
             inbound_id = row[0]
             c.execute("SELECT port FROM inbounds WHERE id = ?", (inbound_id,))
@@ -777,9 +807,11 @@ import sqlite3, json, uuid, time, sys
 conn = sqlite3.connect("$XUI_DB")
 c = conn.cursor()
 
-c.execute("SELECT id, protocol, stream_settings FROM inbounds WHERE port = ?", ($XUI_PORT,))
+c.execute("SELECT id, protocol, stream_settings, share_addr_strategy, share_addr FROM inbounds WHERE port = ?", ($XUI_PORT,))
 row = c.fetchone()
 inbound_id, protocol, stream_settings_raw = row[0], row[1], row[2]
+share_strategy = row[3] if len(row) > 3 else "node"
+share_val = row[4] if len(row) > 4 else ""
 stream_settings = json.loads(stream_settings_raw) if stream_settings_raw else {}
 
 security = stream_settings.get("security", "none")
@@ -791,10 +823,40 @@ with open("/tmp/xui_scheme.txt", "w") as f:
 if "wsSettings" in stream_settings:
     stream_settings["wsSettings"]["path"] = "$WS_PATH"
 
-# 2. 写入 externalProxy (保证网页控制面板“复制链接/二维码/API”导出端口正确)
+# 2. 智能继承自定义分享地址 (若入站配置了自定义分享地址或已存在优选域名/IP，优先保留为节点连接地址)
+custom_share = ""
+if share_strategy == "custom" and share_val and share_val.strip():
+    custom_share = share_val.strip()
+
+# 检查现有 hosts 记录是否有自定义地址
+c.execute("SELECT id, address FROM hosts WHERE inbound_id = ?", (inbound_id,))
+host_row = c.fetchone()
+if not custom_share and host_row and host_row[1] and host_row[1].strip() and host_row[1].strip() != "$DOMAIN":
+    custom_share = host_row[1].strip()
+
+# 检查现有 externalProxy 是否有自定义 dest
+if not custom_share and stream_settings.get("externalProxy"):
+    for ep in stream_settings["externalProxy"]:
+        dest = ep.get("dest", "")
+        if dest and dest.strip() and dest.strip() != "$DOMAIN":
+            custom_share = dest.strip()
+            break
+
+effective_addr = custom_share if custom_share else "$DOMAIN"
+
+with open("/tmp/xui_effective_addr.txt", "w") as f:
+    f.write(effective_addr)
+
+if custom_share:
+    print(f"\033[0;32m[智能继承] 检测到自定义分享地址: {custom_share}，已保留为客户端连接地址 (Address)\033[0m")
+    c.execute("UPDATE inbounds SET share_addr_strategy = 'custom', share_addr = ? WHERE id = ?", (custom_share, inbound_id))
+else:
+    print(f"\033[0;36m[配置同步] 节点连接地址 (Address) 采用反代域名: $DOMAIN\033[0m")
+
+# 3. 写入 externalProxy (保证网页控制面板“复制链接/二维码/API”导出端口正确)
 stream_settings["externalProxy"] = [
     {
-        "dest": "$DOMAIN",
+        "dest": effective_addr,
         "port": int("$EXTERNAL_PORT"),
         "forceTls": "same",
         "remark": ""
@@ -802,10 +864,8 @@ stream_settings["externalProxy"] = [
 ]
 c.execute("UPDATE inbounds SET stream_settings = ? WHERE id = ?", (json.dumps(stream_settings), inbound_id))
 
-# 3. 检查/添加主机映射表 (Hosts)，保证订阅接口 (/sub/) 导出端口正确
+# 4. 检查/添加主机映射表 (Hosts)，保证订阅接口 (/sub/) 导出端口正确
 now = int(time.time() * 1000)
-c.execute("SELECT id FROM hosts WHERE inbound_id = ?", (inbound_id,))
-host_row = c.fetchone()
 
 if host_row:
     c.execute("""
@@ -813,7 +873,7 @@ if host_row:
             address = ?, port = ?, path = ?, sni = ?, host_header = ?,
             security = 'same', updated_at = ?
         WHERE inbound_id = ?
-    """, ("$DOMAIN", int("$EXTERNAL_PORT"), "$WS_PATH", "$DOMAIN", "$DOMAIN", now, inbound_id))
+    """, (effective_addr, int("$EXTERNAL_PORT"), "$WS_PATH", "$DOMAIN", "$DOMAIN", now, inbound_id))
     print(f"\033[0;32m[OK] 已同步更新主机映射表 (Hosts ID: {host_row[0]})\033[0m")
 else:
     gid = str(uuid.uuid4())
@@ -825,7 +885,7 @@ else:
             ?, ?, 0, ?, 0, 0,
             ?, ?, 'same', ?, ?, ?, ?, ?
         )
-    """, (gid, inbound_id, f"Auto_{inbound_id}", "$DOMAIN", int("$EXTERNAL_PORT"), "$DOMAIN", "$DOMAIN", "$WS_PATH", now, now))
+    """, (gid, inbound_id, f"Auto_{inbound_id}", effective_addr, int("$EXTERNAL_PORT"), "$DOMAIN", "$DOMAIN", "$WS_PATH", now, now))
     print(f"\033[0;32m[OK] 已新建主机映射记录 (Hosts)\033[0m")
 
 conn.commit()
@@ -1122,12 +1182,20 @@ NGINX_NEW_EOF
     systemctl enable nginx >/dev/null 2>&1 || true
 fi
 
+EFFECTIVE_ADDR=$(cat /tmp/xui_effective_addr.txt 2>/dev/null || echo "$DOMAIN")
+rm -f /tmp/xui_effective_addr.txt
+
 echo -e "\n${GREEN}====================================================${PLAIN}"
 echo -e "${GREEN}               全部自动化配置成功！                 ${PLAIN}"
 echo -e "${GREEN}====================================================${PLAIN}"
 echo -e "Web 服务器类型:       ${CYAN}${WEB_SERVER^^}${PLAIN}"
 echo -e "入站协议类型:         ${CYAN}${INBOUND_PROTOCOL^^}${PLAIN}"
-echo -e "节点域名 (Address):   ${CYAN}${DOMAIN}${PLAIN}"
+if [ -n "$EFFECTIVE_ADDR" ] && [ "$EFFECTIVE_ADDR" != "$DOMAIN" ]; then
+    echo -e "反代域名 (SNI/Host):  ${CYAN}${DOMAIN}${PLAIN}"
+    echo -e "连接地址 (Address):   ${GREEN}${EFFECTIVE_ADDR}${PLAIN} (已智能继承自定义分享地址)"
+else
+    echo -e "节点域名 (Address):   ${CYAN}${DOMAIN}${PLAIN}"
+fi
 echo -e "对外端口 (Port):      ${CYAN}${EXTERNAL_PORT}${PLAIN}"
 echo -e "分流路径 (Path):      ${CYAN}${WS_PATH}${PLAIN}"
 echo -e "3X-UI 入站端口:       ${CYAN}${XUI_PORT}${PLAIN}"
