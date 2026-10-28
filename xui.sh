@@ -9,6 +9,7 @@
 # 4. 深度冲突拦截：防止误覆盖导致已有节点断连 (同时检测 3X-UI、Nginx、Caddy)
 # 5. 订阅双重重写：Hosts 表 + externalProxy 双重生效，API/面板/订阅均输出自定义端口
 # 6. 智能继承分享地址：自动识别并保留自定义分享地址 (优选IP/域名)，保持SNI/Host为反代域名
+# 7. 证书前置智能探测：自动扫描本机证书与域名推荐默认输入，提供拼写防呆拦截
 # ==============================================================================
 
 set -e
@@ -58,10 +59,109 @@ if [ ! -f "$XUI_DB" ]; then
     exit 1
 fi
 
-# 2. 交互式输入基础参数
+# 2. 交互式输入基础参数 (前置智能扫描本机已有证书与域名)
 echo -e "\n${YELLOW}--- [参数输入] ---${PLAIN}"
 
-read -p "1. 节点绑定的域名或公网 IP (例如 node.example.com 或 1.2.3.4): " DOMAIN
+DETECTED_DOMAINS=$(python3 - << 'PYEOF'
+import os, glob, sqlite3, json
+
+found = []
+seen = set()
+
+def add_d(d):
+    if not d: return
+    d = d.strip().replace('_ecc', '')
+    if '.' in d and not d.startswith('.') and d != 'ip' and d not in seen:
+        seen.add(d)
+        found.append(d)
+
+xui_db = "/etc/x-ui/x-ui.db"
+if os.path.exists(xui_db):
+    try:
+        conn = sqlite3.connect(xui_db)
+        c = conn.cursor()
+        c.execute('SELECT value FROM settings WHERE key IN ("webDomain", "subDomain")')
+        for r in c.fetchall():
+            add_d(r[0])
+        c.execute('SELECT stream_settings FROM inbounds')
+        for r in c.fetchall():
+            if not r[0]: continue
+            ss = json.loads(r[0])
+            add_d(ss.get('tlsSettings', {}).get('serverName', ''))
+            for cert in ss.get('tlsSettings', {}).get('certificates', []):
+                cf = cert.get('certificateFile', '')
+                if cf and os.path.exists(cf):
+                    for p in cf.split('/'):
+                        if '.' in p and not p.endswith('.pem') and not p.endswith('.crt') and not p.endswith('.key'):
+                            add_d(p)
+        conn.close()
+    except Exception:
+        pass
+
+search_patterns = [
+    '/root/cert/*/fullchain.pem',
+    '/root/cert-CF/*/fullchain.pem',
+    '/etc/letsencrypt/live/*/fullchain.pem',
+    '/root/.acme.sh/*/*.cer',
+    '/etc/nginx/ssl/*/fullchain.pem'
+]
+for pat in search_patterns:
+    for p in glob.glob(pat):
+        d = os.path.basename(os.path.dirname(p))
+        add_d(d)
+
+print("@@@".join(found))
+PYEOF
+)
+
+if [ -n "$DETECTED_DOMAINS" ]; then
+    IFS='@@@' read -ra DOMAIN_LIST <<< "$DETECTED_DOMAINS"
+    FIRST_SUGG="${DOMAIN_LIST[0]}"
+
+    if [ ${#DOMAIN_LIST[@]} -eq 1 ]; then
+        echo -e "${GREEN}[证书发现] 检测到本机已有可用证书域名: ${CYAN}${FIRST_SUGG}${PLAIN}"
+        read -p "1. 节点绑定的域名或公网 IP [默认: ${FIRST_SUGG} (回车直接确认)]: " INPUT_DOMAIN
+        DOMAIN=${INPUT_DOMAIN:-$FIRST_SUGG}
+    else
+        echo -e "${GREEN}[证书发现] 检测到本机已有可用证书域名：${PLAIN}"
+        for i in "${!DOMAIN_LIST[@]}"; do
+            echo -e "  $((i+1))) ${CYAN}${DOMAIN_LIST[$i]}${PLAIN}"
+        done
+        echo -e "  $(( ${#DOMAIN_LIST[@]} + 1 ))) 手动输入其他域名或公网 IP"
+        read -p "请选择域名序号 [默认 1: ${FIRST_SUGG}]: " D_CHOICE
+        D_CHOICE=${D_CHOICE:-1}
+        if [[ "$D_CHOICE" =~ ^[0-9]+$ ]] && [ "$D_CHOICE" -ge 1 ] && [ "$D_CHOICE" -le "${#DOMAIN_LIST[@]}" ]; then
+            DOMAIN="${DOMAIN_LIST[$((D_CHOICE-1))]}"
+        else
+            read -p "1. 节点绑定的域名或公网 IP: " DOMAIN
+        fi
+    fi
+
+    # 拼写防呆拦截：如果用户手动输入了域名，但与检测到的证书只差 1~2 个字母（如 po.ua vs pp.ua）
+    for detected in "${DOMAIN_LIST[@]}"; do
+        if [ "$DOMAIN" != "$detected" ] && [ ${#DOMAIN} -eq ${#detected} ]; then
+            diff_count=$(python3 -c "
+s1, s2 = '$DOMAIN', '$detected'
+print(sum(1 for a, b in zip(s1, s2) if a != b))
+")
+            if [ "$diff_count" -le 2 ]; then
+                echo -e "\n${YELLOW}====================================================${PLAIN}"
+                echo -e "${YELLOW}           [ 域名拼写疑似失误拦截提示 ]              ${PLAIN}"
+                echo -e "${YELLOW}====================================================${PLAIN}"
+                echo -e "输入域名: ${RED}${DOMAIN}${PLAIN}"
+                echo -e "现有证书: ${GREEN}${detected}${PLAIN} (仅差 ${diff_count} 个字母)"
+                echo -e "若输入错误，会导致 SSL 证书无效或 Nginx 路径分流失败。"
+                echo -e "${YELLOW}====================================================${PLAIN}"
+                read -p "是否自动修正为现有证书域名 ${detected}？[Y/n]: " FIX_TYPO
+                [[ "$FIX_TYPO" != "n" && "$FIX_TYPO" != "N" ]] && DOMAIN="$detected"
+                break
+            fi
+        fi
+    done
+else
+    read -p "1. 节点绑定的域名或公网 IP (例如 node.example.com 或 1.2.3.4): " DOMAIN
+fi
+
 if [ -z "$DOMAIN" ]; then
     echo -e "${RED}[错误] 域名或 IP 不能为空！${PLAIN}"
     exit 1
