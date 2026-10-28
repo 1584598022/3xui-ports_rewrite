@@ -60,9 +60,9 @@ fi
 # 2. 交互式输入基础参数
 echo -e "\n${YELLOW}--- [参数输入] ---${PLAIN}"
 
-read -p "1. 节点绑定的域名 (例如 node.example.com): " DOMAIN
+read -p "1. 节点绑定的域名或公网 IP (例如 node.example.com 或 1.2.3.4): " DOMAIN
 if [ -z "$DOMAIN" ]; then
-    echo -e "${RED}[错误] 域名不能为空！${PLAIN}"
+    echo -e "${RED}[错误] 域名或 IP 不能为空！${PLAIN}"
     exit 1
 fi
 
@@ -86,6 +86,36 @@ if [ "$INBOUND_EXISTS" != "1" ]; then
     echo -e "${RED}[错误] 3X-UI 数据库中未找到监听端口为 ${XUI_PORT} 的入站，请先去 3X-UI 面板创建该入站！${PLAIN}"
     exit 1
 fi
+
+# 自动读取该入站的 TLS 状态与已有证书信息
+INBOUND_INFO=$(python3 - << PYEOF
+import sqlite3, json
+
+conn = sqlite3.connect('$XUI_DB')
+c = conn.cursor()
+c.execute('SELECT stream_settings FROM inbounds WHERE port = ?', ($XUI_PORT,))
+row = c.fetchone()
+conn.close()
+
+security = "none"
+cert_f = ""
+key_f = ""
+
+if row and row[0]:
+    ss = json.loads(row[0])
+    security = ss.get("security", "none")
+    certs = ss.get("tlsSettings", {}).get("certificates", [])
+    if certs:
+        cert_f = certs[0].get("certificateFile", "")
+        key_f = certs[0].get("keyFile", "")
+
+print(f"{security}@@@{cert_f}@@@{key_f}")
+PYEOF
+)
+
+INBOUND_SECURITY=$(echo "$INBOUND_INFO" | awk -F'@@@' '{print $1}')
+DB_CERT=$(echo "$INBOUND_INFO" | awk -F'@@@' '{print $2}')
+DB_KEY=$(echo "$INBOUND_INFO" | awk -F'@@@' '{print $3}')
 
 read -p "3. 对外自定义映射端口 [默认: 443]: " EXTERNAL_PORT
 EXTERNAL_PORT=${EXTERNAL_PORT:-443}
@@ -467,19 +497,34 @@ PYEOF
     fi
 done
 
-# 5. 自动猜测证书路径
-DEFAULT_CERT="/root/cert/${DOMAIN}/fullchain.pem"
-DEFAULT_KEY="/root/cert/${DOMAIN}/privkey.pem"
-[ ! -f "$DEFAULT_CERT" ] && DEFAULT_CERT="/root/cert-CF/${DOMAIN}/fullchain.pem"
-[ ! -f "$DEFAULT_KEY" ] && DEFAULT_KEY="/root/cert-CF/${DOMAIN}/privkey.pem"
-[ ! -f "$DEFAULT_CERT" ] && DEFAULT_CERT="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
-[ ! -f "$DEFAULT_KEY" ] && DEFAULT_KEY="/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
-[ ! -f "$DEFAULT_CERT" ] && DEFAULT_CERT="/etc/nginx/${DOMAIN}.pem"
-[ ! -f "$DEFAULT_KEY" ] && DEFAULT_KEY="/etc/nginx/${DOMAIN}.key"
+# 5. 自动猜测证书路径 (优先从 3X-UI 数据库读取已配置证书，支持域名与 IP 证书)
+DEFAULT_CERT=""
+DEFAULT_KEY=""
+[ -n "$DB_CERT" ] && [ -f "$DB_CERT" ] && DEFAULT_CERT="$DB_CERT"
+[ -n "$DB_KEY" ] && [ -f "$DB_KEY" ] && DEFAULT_KEY="$DB_KEY"
 
-if [ "$WEB_SERVER" = "caddy" ]; then
+[ -z "$DEFAULT_CERT" ] && [ -f "/root/cert/${DOMAIN}/fullchain.pem" ] && DEFAULT_CERT="/root/cert/${DOMAIN}/fullchain.pem"
+[ -z "$DEFAULT_KEY" ] && [ -f "/root/cert/${DOMAIN}/privkey.pem" ] && DEFAULT_KEY="/root/cert/${DOMAIN}/privkey.pem"
+
+[ -z "$DEFAULT_CERT" ] && [ -f "/root/cert/ip/fullchain.pem" ] && DEFAULT_CERT="/root/cert/ip/fullchain.pem"
+[ -z "$DEFAULT_KEY" ] && [ -f "/root/cert/ip/privkey.pem" ] && DEFAULT_KEY="/root/cert/ip/privkey.pem"
+
+[ -z "$DEFAULT_CERT" ] && [ -f "/root/cert-CF/${DOMAIN}/fullchain.pem" ] && DEFAULT_CERT="/root/cert-CF/${DOMAIN}/fullchain.pem"
+[ -z "$DEFAULT_KEY" ] && [ -f "/root/cert-CF/${DOMAIN}/privkey.pem" ] && DEFAULT_KEY="/root/cert-CF/${DOMAIN}/privkey.pem"
+
+[ -z "$DEFAULT_CERT" ] && [ -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" ] && DEFAULT_CERT="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
+[ -z "$DEFAULT_KEY" ] && [ -f "/etc/letsencrypt/live/${DOMAIN}/privkey.pem" ] && DEFAULT_KEY="/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
+
+[ -z "$DEFAULT_CERT" ] && [ -f "/etc/nginx/${DOMAIN}.pem" ] && DEFAULT_CERT="/etc/nginx/${DOMAIN}.pem"
+[ -z "$DEFAULT_KEY" ] && [ -f "/etc/nginx/${DOMAIN}.key" ] && DEFAULT_KEY="/etc/nginx/${DOMAIN}.key"
+
+if [ "$INBOUND_SECURITY" = "none" ]; then
+    echo -e "\n${CYAN}[提示] 检测到该 3X-UI 入站未开启 TLS (明文 WebSocket)，无需配置 SSL 证书。${PLAIN}"
+    CERT_FILE=""
+    KEY_FILE=""
+elif [ "$WEB_SERVER" = "caddy" ]; then
     echo -e "\n${CYAN}[SSL 证书说明] 当前检测到 Caddy。Caddy 支持全自动管理/签发证书。${PLAIN}"
-    echo -e "${CYAN}若已有现成证书直接回车即可；若希望由 Caddy 自动托管证书亦可直接留空。${PLAIN}"
+    echo -e "${CYAN}若已有现成证书（含 IP 证书）直接按回车即可；若希望由 Caddy 自动托管证书亦可直接留空。${PLAIN}"
     read -p "5. SSL 证书路径 [默认: ${DEFAULT_CERT:-无} (可直接按回车)]: " CERT_FILE
     CERT_FILE=${CERT_FILE:-$DEFAULT_CERT}
     read -p "6. SSL 私钥路径 [默认: ${DEFAULT_KEY:-无} (可直接按回车)]: " KEY_FILE
@@ -803,7 +848,7 @@ PYEOF
         mkdir -p /var/www/html
 
         HTTP_REDIRECT_BLOCK=""
-        if [ "$EXTERNAL_PORT" = "443" ]; then
+        if [ "$EXTERNAL_PORT" = "443" ] && [ -n "$CERT_FILE" ]; then
             HTTP_REDIRECT_BLOCK="# 80 跳转 HTTPS
 server {
     listen 80;
@@ -817,16 +862,23 @@ server {
 }"
         fi
 
+        SSL_LISTEN_FLAGS="ssl http2"
+        SSL_CERT_DIRECTIVES="    ssl_certificate $CERT_FILE;
+    ssl_certificate_key $KEY_FILE;"
+        if [ -z "$CERT_FILE" ]; then
+            SSL_LISTEN_FLAGS=""
+            SSL_CERT_DIRECTIVES=""
+        fi
+
         cat << NGINX_NEW_EOF > "$TARGET_CONF"
 $HTTP_REDIRECT_BLOCK
 
-# $EXTERNAL_PORT SSL 核心配置
+# $EXTERNAL_PORT 核心配置
 server {
-    listen $EXTERNAL_PORT ssl http2;
+    listen $EXTERNAL_PORT $SSL_LISTEN_FLAGS;
     server_name $DOMAIN;
 
-    ssl_certificate $CERT_FILE;
-    ssl_certificate_key $KEY_FILE;
+$SSL_CERT_DIRECTIVES
 
     location / {
         root /var/www/html;

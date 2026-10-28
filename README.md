@@ -17,7 +17,7 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/1584598022/3xui-ports_rewrite/main/xui.sh)
 ```
 
-按照提示输入域名、3X-UI 入站端口、对外端口及分流路径即可。
+按照提示输入域名或公网 IP、3X-UI 入站端口、对外端口及分流路径即可（支持域名证书、IP 证书或纯 HTTP 明文节点）。
 
 ## 原理
 
