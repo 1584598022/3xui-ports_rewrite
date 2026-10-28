@@ -246,22 +246,22 @@ PYEOF
             INBOUND_SEC=$(python3 -c "import json; print(json.loads('''$PORT_CHECK_RESULT''').get('xui_inbound', {}).get('security') or 'none')")
 
             echo -e "\n${YELLOW}====================================================${PLAIN}"
-            echo -e "${YELLOW}           [ 3X-UI 内部入站端口占用提醒 ]                 ${PLAIN}"
+            echo -e "${YELLOW}           [ 3X-UI 入站端口占用提醒 ]                 ${PLAIN}"
             echo -e "${YELLOW}====================================================${PLAIN}"
             echo -e "冲突端口:   ${CYAN}${CONF_PORT}${PLAIN}"
-            echo -e "占用来源:   ${RED}3X-UI 自身的入站规则${PLAIN} (入站 ID: ${INBOUND_ID:-未知}, 协议: ${INBOUND_PROTO^^}, 传输: ${INBOUND_NET^^}/${INBOUND_SEC^^}, 备注: ${INBOUND_REMARK})"
+            echo -e "占用来源:   ${YELLOW}3X-UI 现有入站${PLAIN} (ID: ${INBOUND_ID:-未知}, 协议: ${INBOUND_PROTO^^}, 传输: ${INBOUND_NET^^}/${INBOUND_SEC^^}, 备注: ${INBOUND_REMARK})"
             echo -e "目标反代:   ${GREEN}${WEB_SERVER^^}${PLAIN}"
-            echo -e "${YELLOW}【原因说明】该端口已被 3X-UI 自身的另一个入站直接占用了！${PLAIN}"
-            echo -e "${YELLOW}若要让 ${WEB_SERVER^^} 统一监听 ${CONF_PORT} 做反代，该端口必须让给 ${WEB_SERVER^^}。${PLAIN}"
+            echo -e "${YELLOW}【说明】该端口已被 3X-UI 的其他入站占用。${PLAIN}"
+            echo -e "${YELLOW}若需通过 ${WEB_SERVER^^} 统一进行多路径分流，${CONF_PORT} 端口需交由 ${WEB_SERVER^^} 监听。${PLAIN}"
             if [ "$IS_WS" = "1" ]; then
-                echo -e "${GREEN}【提示】该冲突入站为 WebSocket 传输。将其改为高位端口释放 ${CONF_PORT} 后，稍后只需再次运行脚本，即可将该旧入站也挂载到 ${CONF_PORT} (实现双节点共用 ${CONF_PORT})！${PLAIN}"
+                echo -e "${GREEN}提示：原入站采用 WebSocket 传输。移至高位端口释放 ${CONF_PORT} 后，稍后可再次运行脚本将其一并挂载到 ${CONF_PORT}。${PLAIN}"
             else
-                echo -e "${YELLOW}【提示】该冲突入站为 ${INBOUND_NET^^}/${INBOUND_SEC^^} 传输，不支持 Web 路径反代。将其改为高位端口后需直接连接新端口；若该入站必须使用 ${CONF_PORT}，建议选择选项 2 (当前节点对外改用 8443 等)！${PLAIN}"
+                echo -e "${YELLOW}提示：原入站为 ${INBOUND_NET^^}/${INBOUND_SEC^^} 协议，不支持 Web 路径反代。若原入站必须保留 ${CONF_PORT}，建议选择选项 2。${PLAIN}"
             fi
             echo -e "${YELLOW}====================================================${PLAIN}"
 
             echo -e "请选择处理方式："
-            echo -e "  ${GREEN}1) 自动修改该冲突入站的端口 (将其改为高位端口释放 ${CONF_PORT}，推荐)${PLAIN}"
+            echo -e "  ${GREEN}1) 将冲突入站修改为高位端口 (释放 ${CONF_PORT} 给 ${WEB_SERVER^^}，推荐)${PLAIN}"
             echo -e "  ${CYAN}2) 本次分流改用其他对外映射端口 (例如 8443, 2096 等，保留原入站不变)${PLAIN}"
             echo -e "  ${RED}3) 放弃并退出${PLAIN}"
 
@@ -313,8 +313,8 @@ PYEOF
             echo -e "占用进程:   ${RED}${PROC_NAME}${PLAIN} (PID: ${PROC_PID})"
             [ -n "$PROC_SVC" ] && echo -e "占用服务:   ${YELLOW}${PROC_SVC}${PLAIN}"
             echo -e "目标反代:   ${GREEN}${WEB_SERVER^^}${PLAIN}"
-            echo -e "${RED}【风险说明】端口 ${CONF_PORT} 正被非 ${WEB_SERVER^^} 的其他服务独占！${PLAIN}"
-            echo -e "${RED}如果不处理，后续 ${WEB_SERVER^^} 启动时必定报错崩溃 (Address already in use)。${PLAIN}"
+            echo -e "${RED}【说明】端口 ${CONF_PORT} 正被其他服务占用。${PLAIN}"
+            echo -e "${RED}若不处理，${WEB_SERVER^^} 启动时将因端口冲突报错 (Address already in use)。${PLAIN}"
             echo -e "${RED}====================================================${PLAIN}"
 
             echo -e "请选择处理方式："
