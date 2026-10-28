@@ -953,12 +953,13 @@ if custom_share:
 else:
     print(f"\033[0;36m[配置同步] 节点连接地址 (Address) 采用反代域名: $DOMAIN\033[0m")
 
-# 3. 写入 externalProxy (保证网页控制面板“复制链接/二维码/API”导出端口正确)
+# 3. 写入 externalProxy (保证网页控制面板“复制链接/二维码/API”导出端口与 SNI 正确)
 stream_settings["externalProxy"] = [
     {
         "dest": effective_addr,
         "port": int("$EXTERNAL_PORT"),
         "forceTls": "same",
+        "sni": "$DOMAIN",
         "remark": ""
     }
 ]
@@ -991,15 +992,16 @@ else:
 # 5. 安装双向联动触发器，保证后续在【主机】或【入站】任意一处改动地址，入站导出与订阅始终 100% 实时同步
 c.execute("""
 CREATE TRIGGER IF NOT EXISTS trg_sync_hosts_to_inbounds
-AFTER UPDATE OF address, port ON hosts
+AFTER UPDATE OF address, port, sni ON hosts
 FOR EACH ROW
-WHEN NEW.address != OLD.address OR NEW.port != OLD.port
+WHEN NEW.address != OLD.address OR NEW.port != OLD.port OR NEW.sni != OLD.sni
 BEGIN
     UPDATE inbounds
     SET stream_settings = json_set(
         stream_settings,
         '$.externalProxy[0].dest', NEW.address,
-        '$.externalProxy[0].port', NEW.port
+        '$.externalProxy[0].port', NEW.port,
+        '$.externalProxy[0].sni', NEW.sni
     ),
     share_addr_strategy = 'custom',
     share_addr = NEW.address
