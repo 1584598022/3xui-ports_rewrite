@@ -888,6 +888,48 @@ else:
     """, (gid, inbound_id, f"Auto_{inbound_id}", effective_addr, int("$EXTERNAL_PORT"), "$DOMAIN", "$DOMAIN", "$WS_PATH", now, now))
     print(f"\033[0;32m[OK] 已新建主机映射记录 (Hosts)\033[0m")
 
+# 5. 安装双向联动触发器，保证后续在【主机】或【入站】任意一处改动地址，入站导出与订阅始终 100% 实时同步
+c.execute("""
+CREATE TRIGGER IF NOT EXISTS trg_sync_hosts_to_inbounds
+AFTER UPDATE OF address, port ON hosts
+FOR EACH ROW
+WHEN NEW.address != OLD.address OR NEW.port != OLD.port
+BEGIN
+    UPDATE inbounds
+    SET stream_settings = json_set(
+        stream_settings,
+        '$.externalProxy[0].dest', NEW.address,
+        '$.externalProxy[0].port', NEW.port
+    ),
+    share_addr_strategy = 'custom',
+    share_addr = NEW.address
+    WHERE id = NEW.inbound_id
+      AND json_extract(stream_settings, '$.externalProxy') IS NOT NULL;
+END;
+""")
+
+c.execute("""
+CREATE TRIGGER IF NOT EXISTS trg_sync_inbounds_to_hosts
+AFTER UPDATE OF share_addr ON inbounds
+FOR EACH ROW
+WHEN NEW.share_addr_strategy = 'custom' AND NEW.share_addr != '' AND (OLD.share_addr IS NULL OR NEW.share_addr != OLD.share_addr)
+BEGIN
+    UPDATE hosts
+    SET address = NEW.share_addr
+    WHERE inbound_id = NEW.id
+      AND address != NEW.share_addr;
+
+    UPDATE inbounds
+    SET stream_settings = json_set(
+        stream_settings,
+        '$.externalProxy[0].dest', NEW.share_addr
+    )
+    WHERE id = NEW.id
+      AND json_extract(stream_settings, '$.externalProxy') IS NOT NULL
+      AND json_extract(stream_settings, '$.externalProxy[0].dest') != NEW.share_addr;
+END;
+""")
+
 conn.commit()
 conn.close()
 PYEOF
