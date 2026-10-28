@@ -210,7 +210,30 @@ if all_foreign:
                 xui_inbound = o.get("inbound_info")
                 break
     
-    def get_random_free_port(min_p=20000, max_p=55000):
+    def get_iptables_blocked_ranges():
+        blocked = []
+        try:
+            res = subprocess.run(["iptables-save"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            for line in res.stdout.splitlines():
+                m = re.search(r'--dport\s+(\d+)(?::(\d+))?', line)
+                if m:
+                    start = int(m.group(1))
+                    end = int(m.group(2)) if m.group(2) else start
+                    blocked.append((start, end))
+                m_multi = re.search(r'--dports\s+([0-9,:]+)', line)
+                if m_multi:
+                    for part in m_multi.group(1).split(','):
+                        if ':' in part:
+                            s, e = part.split(':')
+                            blocked.append((int(s), int(e)))
+                        else:
+                            p = int(part)
+                            blocked.append((p, p))
+        except Exception:
+            pass
+        return blocked
+
+    def get_random_free_port(min_p=10000, max_p=65000):
         import random
         used_db_ports = set()
         if os.path.exists(xui_db):
@@ -225,15 +248,20 @@ if all_foreign:
             except Exception:
                 pass
 
-        for _ in range(100):
+        blocked_ranges = get_iptables_blocked_ranges()
+
+        for _ in range(300):
             candidate = random.randint(min_p, max_p)
             if candidate in used_db_ports:
                 continue
+            # 避开 iptables 端口跳跃区间 (如 Hysteria 2 / TUIC)
+            if any(s <= candidate <= e for s, e in blocked_ranges):
+                continue
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(0.2)
+                s.settimeout(0.1)
                 if s.connect_ex(('127.0.0.1', candidate)) != 0:
                     return candidate
-        return 20443
+        return 60999
 
     free_p = get_random_free_port()
 
@@ -279,7 +307,7 @@ PYEOF
             echo -e "${YELLOW}====================================================${PLAIN}"
 
             echo -e "请选择处理方式："
-            echo -e "  ${GREEN}1) 将冲突入站修改为高位端口 (释放 ${CONF_PORT} 给 ${WEB_SERVER^^}，推荐)${PLAIN}"
+            echo -e "  ${GREEN}1) 将冲突入站修改为高位端口 (避开已有入站及 Hy2 端口跳跃区间，推荐: ${SUGG_FREE_PORT})${PLAIN}"
             echo -e "  ${CYAN}2) 本次分流改用其他对外映射端口 (例如 8443, 2096 等，保留原入站不变)${PLAIN}"
             echo -e "  ${RED}3) 放弃并退出${PLAIN}"
 
@@ -290,6 +318,26 @@ PYEOF
                 1)
                     read -p "请输入该冲突入站的新端口 [默认: ${SUGG_FREE_PORT}]: " INPUT_NEW_PORT
                     NEW_PORT=${INPUT_NEW_PORT:-$SUGG_FREE_PORT}
+
+                    # 校验用户输入的端口是否处于 iptables 端口跳跃区间 (如 Hy2)
+                    PORT_WARN=$(python3 -c "
+import subprocess, re
+port = int('$NEW_PORT')
+try:
+    res = subprocess.run(['iptables-save'], stdout=subprocess.PIPE, text=True)
+    for line in res.stdout.splitlines():
+        m = re.search(r'--dport\s+(\d+):(\d+)', line)
+        if m and int(m.group(1)) <= port <= int(m.group(2)):
+            print(f'{m.group(1)}:{m.group(2)}')
+            break
+except:
+    pass
+")
+                    if [ -n "$PORT_WARN" ]; then
+                        echo -e "${YELLOW}[警告] 端口 ${NEW_PORT} 处于 iptables 端口跳跃区间 (${PORT_WARN}) 中，可能会被转发！${PLAIN}"
+                        read -p "是否仍然强制使用？[y/N]: " FORCE_USE
+                        [[ "$FORCE_USE" != "y" && "$FORCE_USE" != "Y" ]] && continue
+                    fi
 
                     echo -e "${YELLOW}正在修改 3X-UI 数据库中该入站端口并重启 3X-UI 使其释放 ${CONF_PORT}...${PLAIN}"
                     python3 - << PYEOF
