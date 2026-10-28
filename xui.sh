@@ -163,11 +163,22 @@ def check_p(p):
                     try:
                         conn = sqlite3.connect(xui_db)
                         c = conn.cursor()
-                        c.execute("SELECT id, port, protocol, remark FROM inbounds WHERE port = ?", (p,))
+                        c.execute("SELECT id, port, protocol, remark, stream_settings FROM inbounds WHERE port = ?", (p,))
                         r = c.fetchone()
                         conn.close()
                         if r:
-                            inbound_info = {"id": r[0], "port": r[1], "protocol": r[2], "remark": r[3]}
+                            net = "tcp"
+                            sec = "none"
+                            if r[4]:
+                                ss = json.loads(r[4])
+                                net = ss.get("network", "tcp")
+                                sec = ss.get("security", "none")
+                            inbound_info = {
+                                "id": r[0], "port": r[1], "protocol": r[2], 
+                                "remark": r[3] or "无备注",
+                                "network": net, "security": sec,
+                                "is_ws": (net == "ws")
+                            }
                     except:
                         pass
                 occupiers.append({
@@ -230,15 +241,23 @@ PYEOF
             INBOUND_PROTO=$(python3 -c "import json; print(json.loads('''$PORT_CHECK_RESULT''').get('xui_inbound', {}).get('protocol') or 'xray')")
             INBOUND_REMARK=$(python3 -c "import json; print(json.loads('''$PORT_CHECK_RESULT''').get('xui_inbound', {}).get('remark') or '无备注')")
             SUGG_FREE_PORT=$(python3 -c "import json; print(json.loads('''$PORT_CHECK_RESULT''').get('suggested_free_port') or '20001')")
+            IS_WS=$(python3 -c "import json; print('1' if json.loads('''$PORT_CHECK_RESULT''').get('xui_inbound', {}).get('is_ws') else '0')")
+            INBOUND_NET=$(python3 -c "import json; print(json.loads('''$PORT_CHECK_RESULT''').get('xui_inbound', {}).get('network') or 'tcp')")
+            INBOUND_SEC=$(python3 -c "import json; print(json.loads('''$PORT_CHECK_RESULT''').get('xui_inbound', {}).get('security') or 'none')")
 
             echo -e "\n${YELLOW}====================================================${PLAIN}"
             echo -e "${YELLOW}           [ 3X-UI 内部入站端口占用提醒 ]                 ${PLAIN}"
             echo -e "${YELLOW}====================================================${PLAIN}"
             echo -e "冲突端口:   ${CYAN}${CONF_PORT}${PLAIN}"
-            echo -e "占用来源:   ${RED}3X-UI 自身的入站规则${PLAIN} (入站 ID: ${INBOUND_ID:-未知}, 协议: ${INBOUND_PROTO}, 备注: ${INBOUND_REMARK})"
+            echo -e "占用来源:   ${RED}3X-UI 自身的入站规则${PLAIN} (入站 ID: ${INBOUND_ID:-未知}, 协议: ${INBOUND_PROTO^^}, 传输: ${INBOUND_NET^^}/${INBOUND_SEC^^}, 备注: ${INBOUND_REMARK})"
             echo -e "目标反代:   ${GREEN}${WEB_SERVER^^}${PLAIN}"
             echo -e "${YELLOW}【原因说明】该端口已被 3X-UI 自身的另一个入站直接占用了！${PLAIN}"
             echo -e "${YELLOW}若要让 ${WEB_SERVER^^} 统一监听 ${CONF_PORT} 做反代，该端口必须让给 ${WEB_SERVER^^}。${PLAIN}"
+            if [ "$IS_WS" = "1" ]; then
+                echo -e "${GREEN}【提示】该冲突入站为 WebSocket 传输。将其改为高位端口释放 ${CONF_PORT} 后，稍后只需再次运行脚本，即可将该旧入站也挂载到 ${CONF_PORT} (实现双节点共用 ${CONF_PORT})！${PLAIN}"
+            else
+                echo -e "${YELLOW}【提示】该冲突入站为 ${INBOUND_NET^^}/${INBOUND_SEC^^} 传输，不支持 Web 路径反代。将其改为高位端口后需直接连接新端口；若该入站必须使用 ${CONF_PORT}，建议选择选项 2 (当前节点对外改用 8443 等)！${PLAIN}"
+            fi
             echo -e "${YELLOW}====================================================${PLAIN}"
 
             echo -e "请选择处理方式："
