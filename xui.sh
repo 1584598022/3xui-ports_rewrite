@@ -87,35 +87,40 @@ if [ "$INBOUND_EXISTS" != "1" ]; then
     exit 1
 fi
 
-# 自动读取该入站的 TLS 状态与已有证书信息
+# 自动读取该入站的协议、TLS 状态与已有证书信息
 INBOUND_INFO=$(python3 - << PYEOF
 import sqlite3, json
 
 conn = sqlite3.connect('$XUI_DB')
 c = conn.cursor()
-c.execute('SELECT stream_settings FROM inbounds WHERE port = ?', ($XUI_PORT,))
+c.execute('SELECT protocol, stream_settings FROM inbounds WHERE port = ?', ($XUI_PORT,))
 row = c.fetchone()
 conn.close()
 
+protocol = row[0] if row else "vless"
 security = "none"
 cert_f = ""
 key_f = ""
+ws_path = ""
 
-if row and row[0]:
-    ss = json.loads(row[0])
+if row and row[1]:
+    ss = json.loads(row[1])
     security = ss.get("security", "none")
     certs = ss.get("tlsSettings", {}).get("certificates", [])
     if certs:
         cert_f = certs[0].get("certificateFile", "")
         key_f = certs[0].get("keyFile", "")
+    ws_path = ss.get("wsSettings", {}).get("path", "")
 
-print(f"{security}@@@{cert_f}@@@{key_f}")
+print(f"{protocol}@@@{security}@@@{cert_f}@@@{key_f}@@@{ws_path}")
 PYEOF
 )
 
-INBOUND_SECURITY=$(echo "$INBOUND_INFO" | awk -F'@@@' '{print $1}')
-DB_CERT=$(echo "$INBOUND_INFO" | awk -F'@@@' '{print $2}')
-DB_KEY=$(echo "$INBOUND_INFO" | awk -F'@@@' '{print $3}')
+INBOUND_PROTOCOL=$(echo "$INBOUND_INFO" | awk -F'@@@' '{print $1}')
+INBOUND_SECURITY=$(echo "$INBOUND_INFO" | awk -F'@@@' '{print $2}')
+DB_CERT=$(echo "$INBOUND_INFO" | awk -F'@@@' '{print $3}')
+DB_KEY=$(echo "$INBOUND_INFO" | awk -F'@@@' '{print $4}')
+EXISTING_PATH=$(echo "$INBOUND_INFO" | awk -F'@@@' '{print $5}')
 
 read -p "3. 对外自定义映射端口 [默认: 443]: " EXTERNAL_PORT
 EXTERNAL_PORT=${EXTERNAL_PORT:-443}
@@ -228,7 +233,7 @@ PYEOF
     fi
 done
 
-# 3. 智能计算推荐路径（若 /vless-ws 已被占，自动递增为 /vless-ws2, /vless-ws3...）
+# 3. 智能计算推荐路径 (根据入站协议自动生成 /vmess-ws, /vless-ws, /trojan-ws 等，若被占自动顺延)
 SUGGESTED_PATH=$(python3 - << PYEOF
 import sqlite3, json, os, re
 
@@ -236,6 +241,8 @@ domain = "$DOMAIN"
 xui_port = int("$XUI_PORT")
 ext_port = int("$EXTERNAL_PORT")
 web_server = "$WEB_SERVER"
+protocol = "$INBOUND_PROTOCOL"
+existing_path = "$EXISTING_PATH"
 
 used_paths = set()
 
@@ -321,13 +328,21 @@ else:
             except Exception:
                 pass
 
-# 计算首个空闲路径
-candidate = "/vless-ws"
+# 计算首个空闲路径 (根据协议自适应默认路径)
+proto = protocol.lower() if protocol else "vless"
+proto_abbr = "ss" if proto == "shadowsocks" else proto
+
+if existing_path and existing_path not in ["", "/"]:
+    base_candidate = existing_path
+else:
+    base_candidate = f"/{proto_abbr}-ws"
+
+candidate = base_candidate
 if candidate in used_paths:
     idx = 2
-    while f"/vless-ws{idx}" in used_paths:
+    while f"{base_candidate}{idx}" in used_paths:
         idx += 1
-    candidate = f"/vless-ws{idx}"
+    candidate = f"{base_candidate}{idx}"
 
 print(candidate)
 PYEOF
@@ -905,6 +920,7 @@ echo -e "\n${GREEN}====================================================${PLAIN}"
 echo -e "${GREEN}               全部自动化配置成功！                 ${PLAIN}"
 echo -e "${GREEN}====================================================${PLAIN}"
 echo -e "Web 服务器类型:       ${CYAN}${WEB_SERVER^^}${PLAIN}"
+echo -e "入站协议类型:         ${CYAN}${INBOUND_PROTOCOL^^}${PLAIN}"
 echo -e "节点域名 (Address):   ${CYAN}${DOMAIN}${PLAIN}"
 echo -e "对外端口 (Port):      ${CYAN}${EXTERNAL_PORT}${PLAIN}"
 echo -e "分流路径 (Path):      ${CYAN}${WS_PATH}${PLAIN}"
