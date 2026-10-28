@@ -125,13 +125,14 @@ EXISTING_PATH=$(echo "$INBOUND_INFO" | awk -F'@@@' '{print $5}')
 read -p "3. 对外自定义映射端口 [默认: 443]: " EXTERNAL_PORT
 EXTERNAL_PORT=${EXTERNAL_PORT:-443}
 
-# 2.5 端口物理占用前置检测 (检查 443/指定对外端口 是否被非 Nginx/Caddy 的异构服务如 Apache/Docker 占用)
+# 2.5 端口物理占用前置检测 (检查 443/指定对外端口 是否被非 Nginx/Caddy 的服务占用)
 while true; do
     PORT_CHECK_RESULT=$(python3 - << PYEOF
-import subprocess, re, os, json
+import subprocess, re, os, json, sqlite3, socket
 
 port = int("$EXTERNAL_PORT")
 web_server = "$WEB_SERVER"
+xui_db = "$XUI_DB"
 
 def check_p(p):
     cmd = ["ss", "-tlpn", f"sport = :{p}"]
@@ -156,7 +157,27 @@ def check_p(p):
                                 break
                 except:
                     pass
-                occupiers.append({"name": proc_name, "pid": pid, "service": svc, "port": p})
+                is_xui = ("xray" in proc_name.lower() or "x-ui" in proc_name.lower() or "x-ui" in svc.lower())
+                inbound_info = None
+                if is_xui and os.path.exists(xui_db):
+                    try:
+                        conn = sqlite3.connect(xui_db)
+                        c = conn.cursor()
+                        c.execute("SELECT id, port, protocol, remark FROM inbounds WHERE port = ?", (p,))
+                        r = c.fetchone()
+                        conn.close()
+                        if r:
+                            inbound_info = {"id": r[0], "port": r[1], "protocol": r[2], "remark": r[3]}
+                    except:
+                        pass
+                occupiers.append({
+                    "name": proc_name, 
+                    "pid": pid, 
+                    "service": svc, 
+                    "port": p, 
+                    "is_xui": is_xui,
+                    "inbound_info": inbound_info
+                })
     return occupiers
 
 ports_to_check = [port]
@@ -170,7 +191,30 @@ for p in ports_to_check:
     all_foreign.extend(foreign)
 
 if all_foreign:
-    print(json.dumps({"status": "CONFLICT", "foreign": all_foreign}))
+    is_xui_conflict = any(o.get("is_xui") for o in all_foreign)
+    xui_inbound = None
+    if is_xui_conflict:
+        for o in all_foreign:
+            if o.get("inbound_info"):
+                xui_inbound = o.get("inbound_info")
+                break
+    
+    def find_free_port(start=20001):
+        for port_c in range(start, 65535):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                if s.connect_ex(('127.0.0.1', port_c)) != 0:
+                    return port_c
+        return 20443
+
+    free_p = find_free_port(20001)
+
+    print(json.dumps({
+        "status": "CONFLICT",
+        "is_xui": is_xui_conflict,
+        "xui_inbound": xui_inbound,
+        "suggested_free_port": free_p,
+        "foreign": all_foreign
+    }))
 else:
     print(json.dumps({"status": "OK"}))
 PYEOF
@@ -179,55 +223,116 @@ PYEOF
     STATUS=$(python3 -c "import json; print(json.loads('''$PORT_CHECK_RESULT''')['status'])")
     if [ "$STATUS" = "CONFLICT" ]; then
         CONF_PORT=$(python3 -c "import json; print(json.loads('''$PORT_CHECK_RESULT''')['foreign'][0]['port'])")
-        PROC_NAME=$(python3 -c "import json; print(json.loads('''$PORT_CHECK_RESULT''')['foreign'][0]['name'])")
-        PROC_PID=$(python3 -c "import json; print(json.loads('''$PORT_CHECK_RESULT''')['foreign'][0]['pid'])")
-        PROC_SVC=$(python3 -c "import json; print(json.loads('''$PORT_CHECK_RESULT''')['foreign'][0].get('service') or '')")
+        IS_XUI=$(python3 -c "import json; print('1' if json.loads('''$PORT_CHECK_RESULT''').get('is_xui') else '0')")
 
-        echo -e "\n${RED}====================================================${PLAIN}"
-        echo -e "${RED}             [ 端口占用冲突拦截警告 ]                 ${PLAIN}"
-        echo -e "${RED}====================================================${PLAIN}"
-        echo -e "冲突端口:   ${CYAN}${CONF_PORT}${PLAIN}"
-        echo -e "占用进程:   ${RED}${PROC_NAME}${PLAIN} (PID: ${PROC_PID})"
-        [ -n "$PROC_SVC" ] && echo -e "占用服务:   ${YELLOW}${PROC_SVC}${PLAIN}"
-        echo -e "目标反代:   ${GREEN}${WEB_SERVER^^}${PLAIN}"
-        echo -e "${RED}【风险说明】端口 ${CONF_PORT} 正被非 ${WEB_SERVER^^} 的其他服务独占！${PLAIN}"
-        echo -e "${RED}如果不处理，后续 ${WEB_SERVER^^} 启动时必定报错崩溃 (Address already in use)。${PLAIN}"
-        echo -e "${RED}====================================================${PLAIN}"
+        if [ "$IS_XUI" = "1" ]; then
+            INBOUND_ID=$(python3 -c "import json; print(json.loads('''$PORT_CHECK_RESULT''').get('xui_inbound', {}).get('id') or '')")
+            INBOUND_PROTO=$(python3 -c "import json; print(json.loads('''$PORT_CHECK_RESULT''').get('xui_inbound', {}).get('protocol') or 'xray')")
+            INBOUND_REMARK=$(python3 -c "import json; print(json.loads('''$PORT_CHECK_RESULT''').get('xui_inbound', {}).get('remark') or '无备注')")
+            SUGG_FREE_PORT=$(python3 -c "import json; print(json.loads('''$PORT_CHECK_RESULT''').get('suggested_free_port') or '20001')")
 
-        echo -e "请选择处理方式："
-        echo -e "  ${GREEN}1) 更换对外映射端口 (例如 8443, 2053, 2083, 2087, 2096 等, 推荐)${PLAIN}"
-        if [ -n "$PROC_SVC" ]; then
-            echo -e "  ${YELLOW}2) 自动停止并禁用占用服务 (${PROC_SVC})${PLAIN}"
+            echo -e "\n${YELLOW}====================================================${PLAIN}"
+            echo -e "${YELLOW}           [ 3X-UI 内部入站端口占用提醒 ]                 ${PLAIN}"
+            echo -e "${YELLOW}====================================================${PLAIN}"
+            echo -e "冲突端口:   ${CYAN}${CONF_PORT}${PLAIN}"
+            echo -e "占用来源:   ${RED}3X-UI 自身的入站规则${PLAIN} (入站 ID: ${INBOUND_ID:-未知}, 协议: ${INBOUND_PROTO}, 备注: ${INBOUND_REMARK})"
+            echo -e "目标反代:   ${GREEN}${WEB_SERVER^^}${PLAIN}"
+            echo -e "${YELLOW}【原因说明】该端口已被 3X-UI 自身的另一个入站直接占用了！${PLAIN}"
+            echo -e "${YELLOW}若要让 ${WEB_SERVER^^} 统一监听 ${CONF_PORT} 做反代，该端口必须让给 ${WEB_SERVER^^}。${PLAIN}"
+            echo -e "${YELLOW}====================================================${PLAIN}"
+
+            echo -e "请选择处理方式："
+            echo -e "  ${GREEN}1) 自动修改该冲突入站的端口 (将其改为高位端口释放 ${CONF_PORT}，推荐)${PLAIN}"
+            echo -e "  ${CYAN}2) 本次分流改用其他对外映射端口 (例如 8443, 2096 等，保留原入站不变)${PLAIN}"
+            echo -e "  ${RED}3) 放弃并退出${PLAIN}"
+
+            read -p "请输入选项 [默认 1]: " XUI_PORT_CHOICE
+            XUI_PORT_CHOICE=${XUI_PORT_CHOICE:-1}
+
+            case "$XUI_PORT_CHOICE" in
+                1)
+                    read -p "请输入该冲突入站的新端口 [默认: ${SUGG_FREE_PORT}]: " INPUT_NEW_PORT
+                    NEW_PORT=${INPUT_NEW_PORT:-$SUGG_FREE_PORT}
+
+                    echo -e "${YELLOW}正在修改 3X-UI 数据库中该入站端口并重启 3X-UI 使其释放 ${CONF_PORT}...${PLAIN}"
+                    python3 - << PYEOF
+import sqlite3
+conn = sqlite3.connect("$XUI_DB")
+c = conn.cursor()
+if "$INBOUND_ID":
+    c.execute("UPDATE inbounds SET port = ? WHERE id = ?", (int("$NEW_PORT"), int("$INBOUND_ID")))
+else:
+    c.execute("UPDATE inbounds SET port = ? WHERE port = ?", (int("$NEW_PORT"), int("$CONF_PORT")))
+conn.commit()
+conn.close()
+PYEOF
+                    systemctl restart x-ui
+                    sleep 2
+                    echo -e "${GREEN}[OK] 已成功将冲突入站修改为端口 ${NEW_PORT}！${PLAIN}"
+                    echo -e "${GREEN}端口 ${CONF_PORT} 已成功释放给 ${WEB_SERVER^^}，正在重新检测...${PLAIN}"
+                    continue
+                    ;;
+                2)
+                    read -p "请输入新的对外映射端口 [例如 8443]: " EXTERNAL_PORT
+                    EXTERNAL_PORT=${EXTERNAL_PORT:-8443}
+                    continue
+                    ;;
+                *)
+                    echo -e "${RED}[操作取消] 已安全退出，未做任何修改。${PLAIN}"
+                    exit 0
+                    ;;
+            esac
         else
-            echo -e "  ${YELLOW}2) 强制终止占用进程 (${PROC_NAME}, PID: ${PROC_PID})${PLAIN}"
+            PROC_NAME=$(python3 -c "import json; print(json.loads('''$PORT_CHECK_RESULT''')['foreign'][0]['name'])")
+            PROC_PID=$(python3 -c "import json; print(json.loads('''$PORT_CHECK_RESULT''')['foreign'][0]['pid'])")
+            PROC_SVC=$(python3 -c "import json; print(json.loads('''$PORT_CHECK_RESULT''')['foreign'][0].get('service') or '')")
+
+            echo -e "\n${RED}====================================================${PLAIN}"
+            echo -e "${RED}             [ 端口占用冲突拦截警告 ]                 ${PLAIN}"
+            echo -e "${RED}====================================================${PLAIN}"
+            echo -e "冲突端口:   ${CYAN}${CONF_PORT}${PLAIN}"
+            echo -e "占用进程:   ${RED}${PROC_NAME}${PLAIN} (PID: ${PROC_PID})"
+            [ -n "$PROC_SVC" ] && echo -e "占用服务:   ${YELLOW}${PROC_SVC}${PLAIN}"
+            echo -e "目标反代:   ${GREEN}${WEB_SERVER^^}${PLAIN}"
+            echo -e "${RED}【风险说明】端口 ${CONF_PORT} 正被非 ${WEB_SERVER^^} 的其他服务独占！${PLAIN}"
+            echo -e "${RED}如果不处理，后续 ${WEB_SERVER^^} 启动时必定报错崩溃 (Address already in use)。${PLAIN}"
+            echo -e "${RED}====================================================${PLAIN}"
+
+            echo -e "请选择处理方式："
+            echo -e "  ${GREEN}1) 更换对外映射端口 (例如 8443, 2053, 2083, 2087, 2096 等, 推荐)${PLAIN}"
+            if [ -n "$PROC_SVC" ]; then
+                echo -e "  ${YELLOW}2) 自动停止并禁用占用服务 (${PROC_SVC})${PLAIN}"
+            else
+                echo -e "  ${YELLOW}2) 强制终止占用进程 (${PROC_NAME}, PID: ${PROC_PID})${PLAIN}"
+            fi
+            echo -e "  ${RED}3) 放弃并退出${PLAIN}"
+
+            read -p "请输入选项 [默认 1]: " PORT_CHOICE
+            PORT_CHOICE=${PORT_CHOICE:-1}
+
+            case "$PORT_CHOICE" in
+                1)
+                    read -p "请输入新的对外映射端口 [例如 8443]: " EXTERNAL_PORT
+                    EXTERNAL_PORT=${EXTERNAL_PORT:-8443}
+                    continue
+                    ;;
+                2)
+                    if [ -n "$PROC_SVC" ]; then
+                        echo -e "${YELLOW}正在停止并禁用服务 ${PROC_SVC}...${PLAIN}"
+                        systemctl stop "$PROC_SVC" 2>/dev/null || true
+                        systemctl disable "$PROC_SVC" 2>/dev/null || true
+                    fi
+                    kill -9 "$PROC_PID" 2>/dev/null || true
+                    sleep 1
+                    echo -e "${GREEN}[OK] 已停止占用服务，正在重新检测端口状态...${PLAIN}"
+                    continue
+                    ;;
+                *)
+                    echo -e "${RED}[操作取消] 已安全退出，未做任何修改。${PLAIN}"
+                    exit 0
+                    ;;
+            esac
         fi
-        echo -e "  ${RED}3) 放弃并退出${PLAIN}"
-
-        read -p "请输入选项 [默认 1]: " PORT_CHOICE
-        PORT_CHOICE=${PORT_CHOICE:-1}
-
-        case "$PORT_CHOICE" in
-            1)
-                read -p "请输入新的对外映射端口 [例如 8443]: " EXTERNAL_PORT
-                EXTERNAL_PORT=${EXTERNAL_PORT:-8443}
-                continue
-                ;;
-            2)
-                if [ -n "$PROC_SVC" ]; then
-                    echo -e "${YELLOW}正在停止并禁用服务 ${PROC_SVC}...${PLAIN}"
-                    systemctl stop "$PROC_SVC" 2>/dev/null || true
-                    systemctl disable "$PROC_SVC" 2>/dev/null || true
-                fi
-                kill -9 "$PROC_PID" 2>/dev/null || true
-                sleep 1
-                echo -e "${GREEN}[OK] 已停止占用服务，正在重新检测端口状态...${PLAIN}"
-                continue
-                ;;
-            *)
-                echo -e "${RED}[操作取消] 已安全退出，未做任何修改。${PLAIN}"
-                exit 0
-                ;;
-        esac
     else
         break
     fi
