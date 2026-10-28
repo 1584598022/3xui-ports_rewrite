@@ -248,9 +248,16 @@ if all_foreign:
             except Exception:
                 pass
 
-        blocked_ranges = get_iptables_blocked_ranges()
+        blocked_ranges = sorted(list(set(get_iptables_blocked_ranges())))
         hopping_ranges = [f"{s}-{e}" for s, e in blocked_ranges if e > s]
-        hopping_desc = ", ".join(hopping_ranges[:2]) if hopping_ranges else ""
+        if len(hopping_ranges) == 1:
+            hopping_desc = f"跳跃区间 {hopping_ranges[0]}"
+        elif len(hopping_ranges) == 2:
+            hopping_desc = f"跳跃区间 {hopping_ranges[0]} 及 {hopping_ranges[1]}"
+        elif len(hopping_ranges) > 2:
+            hopping_desc = f"{hopping_ranges[0]} 等 {len(hopping_ranges)} 段跳跃区间"
+        else:
+            hopping_desc = ""
 
         for _ in range(300):
             candidate = random.randint(min_p, max_p)
@@ -297,7 +304,7 @@ PYEOF
 
             PORT_HINT="(自动分配空闲端口，推荐: ${SUGG_FREE_PORT})"
             if [ -n "$HOPPING_DESC" ]; then
-                PORT_HINT="(已避开跳跃区间 ${HOPPING_DESC}，推荐: ${SUGG_FREE_PORT})"
+                PORT_HINT="(已避开${HOPPING_DESC}，推荐: ${SUGG_FREE_PORT})"
             fi
 
             echo -e "\n${YELLOW}====================================================${PLAIN}"
