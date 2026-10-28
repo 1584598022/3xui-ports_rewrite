@@ -149,7 +149,7 @@ print(sum(1 for a, b in zip(s1, s2) if a != b))
                 echo -e "${YELLOW}           [ 域名拼写疑似失误拦截提示 ]              ${PLAIN}"
                 echo -e "${YELLOW}====================================================${PLAIN}"
                 echo -e "输入域名: ${RED}${DOMAIN}${PLAIN}"
-                echo -e "现有证书: ${GREEN}${detected}${PLAIN} (仅差 ${diff_count} 个字母)"
+                echo -e "现有证书: ${GREEN}${detected}${PLAIN}"
                 echo -e "若输入错误，会导致 SSL 证书无效或 Nginx 路径分流失败。"
                 echo -e "${YELLOW}====================================================${PLAIN}"
                 read -p "是否自动修正为现有证书域名 ${detected}？[Y/n]: " FIX_TYPO
