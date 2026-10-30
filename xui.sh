@@ -62,7 +62,7 @@ fi
 # 2. 交互式输入基础参数 (前置智能扫描本机已有证书与域名)
 echo -e "\n${YELLOW}--- [参数输入] ---${PLAIN}"
 
-DETECTED_DOMAINS=$(python3 - << 'PYEOF'
+mapfile -t DOMAIN_LIST < <(python3 - << 'PYEOF'
 import os, glob, sqlite3, json
 
 found = []
@@ -83,7 +83,8 @@ if os.path.exists(xui_db):
         c.execute('SELECT value FROM settings WHERE key IN ("webDomain", "subDomain")')
         for r in c.fetchall():
             add_d(r[0])
-        c.execute('SELECT stream_settings FROM inbounds')
+        # 仅扫描本机本地入站 (node_id IS NULL)，排除子节点同步过来的远端入站
+        c.execute('SELECT stream_settings FROM inbounds WHERE node_id IS NULL')
         for r in c.fetchall():
             if not r[0]: continue
             ss = json.loads(r[0])
@@ -110,12 +111,13 @@ for pat in search_patterns:
         d = os.path.basename(os.path.dirname(p))
         add_d(d)
 
-print("@@@".join(found))
+for d in found:
+    if d and d.strip():
+        print(d.strip())
 PYEOF
 )
 
-if [ -n "$DETECTED_DOMAINS" ]; then
-    IFS='@@@' read -ra DOMAIN_LIST <<< "$DETECTED_DOMAINS"
+if [ ${#DOMAIN_LIST[@]} -gt 0 ]; then
     FIRST_SUGG="${DOMAIN_LIST[0]}"
 
     if [ ${#DOMAIN_LIST[@]} -eq 1 ]; then
@@ -137,27 +139,40 @@ if [ -n "$DETECTED_DOMAINS" ]; then
         fi
     fi
 
-    # 拼写防呆拦截：如果用户手动输入了域名，但与检测到的证书只差 1~2 个字母（如 po.ua vs pp.ua）
+    # 拼写防呆拦截：
+    # 1. 如果用户输入/选中的域名完全命中任何一个已存在证书列表（精确匹配），说明该域名本身就有证书，绝不进行防呆拦截！
+    # 2. 只有当用户输入的域名【不在任何已有证书中】，但与某个现有证书极度相似（如 pp.ua 误输成 po.ua，仅差1~2个字母）时，才予以提示。
+    IS_EXACT_MATCH=false
     for detected in "${DOMAIN_LIST[@]}"; do
-        if [ "$DOMAIN" != "$detected" ] && [ ${#DOMAIN} -eq ${#detected} ]; then
-            diff_count=$(python3 -c "
+        if [ "$DOMAIN" = "$detected" ]; then
+            IS_EXACT_MATCH=true
+            break
+        fi
+    done
+
+    if [ "$IS_EXACT_MATCH" = false ]; then
+        for detected in "${DOMAIN_LIST[@]}"; do
+            [ -z "$detected" ] && continue
+            if [ ${#DOMAIN} -eq ${#detected} ]; then
+                diff_count=$(python3 -c "
 s1, s2 = '$DOMAIN', '$detected'
 print(sum(1 for a, b in zip(s1, s2) if a != b))
 ")
-            if [ "$diff_count" -le 2 ]; then
-                echo -e "\n${YELLOW}====================================================${PLAIN}"
-                echo -e "${YELLOW}           [ 域名拼写疑似失误拦截提示 ]              ${PLAIN}"
-                echo -e "${YELLOW}====================================================${PLAIN}"
-                echo -e "输入域名: ${RED}${DOMAIN}${PLAIN}"
-                echo -e "现有证书: ${GREEN}${detected}${PLAIN}"
-                echo -e "若输入错误，会导致 SSL 证书无效或 Nginx 路径分流失败。"
-                echo -e "${YELLOW}====================================================${PLAIN}"
-                read -p "是否自动修正为现有证书域名 ${detected}？[Y/n]: " FIX_TYPO
-                [[ "$FIX_TYPO" != "n" && "$FIX_TYPO" != "N" ]] && DOMAIN="$detected"
-                break
+                if [ "$diff_count" -le 2 ]; then
+                    echo -e "\n${YELLOW}====================================================${PLAIN}"
+                    echo -e "${YELLOW}           [ 域名拼写疑似失误拦截提示 ]              ${PLAIN}"
+                    echo -e "${YELLOW}====================================================${PLAIN}"
+                    echo -e "输入域名: ${RED}${DOMAIN}${PLAIN}"
+                    echo -e "现有证书: ${GREEN}${detected}${PLAIN}"
+                    echo -e "若输入错误，会导致 SSL 证书无效或 Nginx 路径分流失败。"
+                    echo -e "${YELLOW}====================================================${PLAIN}"
+                    read -p "是否自动修正为现有证书域名 ${detected}？[Y/n]: " FIX_TYPO
+                    [[ "$FIX_TYPO" != "n" && "$FIX_TYPO" != "N" ]] && DOMAIN="$detected"
+                    break
+                fi
             fi
-        fi
-    done
+        done
+    fi
 else
     read -p "1. 节点绑定的域名或公网 IP (例如 node.example.com 或 1.2.3.4): " DOMAIN
 fi
