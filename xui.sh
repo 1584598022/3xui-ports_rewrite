@@ -1062,26 +1062,41 @@ with open("/tmp/xui_scheme.txt", "w") as f:
 if "wsSettings" in stream_settings:
     stream_settings["wsSettings"]["path"] = "$WS_PATH"
 
+import ipaddress, re
+
+def is_valid_addr(val):
+    if not val or not val.strip(): return False
+    val = val.strip()
+    try:
+        ipaddress.ip_address(val)
+        return True
+    except:
+        pass
+    if '.' in val and len(val) <= 253:
+        labels = val.split('.')
+        if len(labels) >= 2 and all(l and len(l) <= 63 and re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$', l) for l in labels):
+            if not labels[-1].isdigit():
+                return True
+    return False
+
 # 2. 智能继承自定义分享地址 (若入站配置了自定义分享地址或已存在优选域名/IP，优先保留为节点连接地址)
 custom_share = ""
-if share_strategy == "custom" and share_val and share_val.strip():
+if share_strategy == "custom" and share_val and share_val.strip() and is_valid_addr(share_val):
     custom_share = share_val.strip()
 
 # 检查现有 hosts 记录是否有自定义地址
 c.execute("SELECT id, address FROM hosts WHERE inbound_id = ?", (inbound_id,))
 host_row = c.fetchone()
-if not custom_share and host_row and host_row[1] and host_row[1].strip() and host_row[1].strip() != "$DOMAIN":
+if not custom_share and host_row and host_row[1] and host_row[1].strip() and host_row[1].strip() != "$DOMAIN" and is_valid_addr(host_row[1]):
     custom_share = host_row[1].strip()
 
 # 检查现有 externalProxy 是否有自定义 dest
 if not custom_share and stream_settings.get("externalProxy"):
     for ep in stream_settings["externalProxy"]:
         dest = ep.get("dest", "")
-        if dest and dest.strip() and dest.strip() != "$DOMAIN":
+        if dest and dest.strip() and dest.strip() != "$DOMAIN" and is_valid_addr(dest):
             custom_share = dest.strip()
             break
-
-import ipaddress
 
 def is_ip(addr):
     try:
@@ -1358,11 +1373,18 @@ ${SSL_UPSTREAM_DIRECTIVE}
     }"
 
     TARGET_CONF=$(python3 - << PYEOF
-import os, sys
+import os, sys, re
 
 domain = "$DOMAIN"
 port = "$EXTERNAL_PORT"
 nginx_dir = "/etc/nginx"
+
+# 1. 优先复用本脚本生成的专属分流配置文件
+self_conf = f"/etc/nginx/conf.d/xui_{domain}_{port}.conf"
+if os.path.exists(self_conf):
+    print(self_conf)
+    sys.exit(0)
+
 matched = []
 
 for root, dirs, files in os.walk(nginx_dir):
@@ -1371,11 +1393,17 @@ for root, dirs, files in os.walk(nginx_dir):
             continue
         if f.endswith(".bak") or "backup" in f:
             continue
+        # 绝不盲目追加到 debian 默认注释模板 default 中
+        if f == "default" and "sites-available" in root:
+            continue
         p = os.path.join(root, f)
         try:
             with open(p) as fp:
                 c = fp.read()
-            if domain in c and port in c:
+            # 严格匹配未注释的 server_name 和 listen 端口
+            has_domain = bool(re.search(r'^\s*server_name\s+[^;]*\b' + re.escape(domain) + r'\b', c, re.MULTILINE))
+            has_port = bool(re.search(r'^\s*listen\s+[^;]*\b' + re.escape(port) + r'\b', c, re.MULTILINE))
+            if has_domain and has_port:
                 matched.append(p)
         except:
             pass
