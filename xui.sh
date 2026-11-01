@@ -59,6 +59,53 @@ if [ ! -f "$XUI_DB" ]; then
     exit 1
 fi
 
+# 域名与公网 IP 格式校验函数 (杜绝单数字、无意义字符或畸形输入)
+validate_domain_or_ip() {
+    local val="$1"
+    python3 -c "
+import ipaddress, re, sys
+
+try:
+    raw = sys.argv[1].strip()
+    val = re.sub(r\"^https?://\", \"\", raw, flags=re.IGNORECASE).rstrip(\"/\")
+    m6 = re.match(r\"^\[([a-fA-F0-9:]+)\](:\d+)?$\", val)
+    if m6:
+        val = m6.group(1)
+    else:
+        m = re.match(r\"^([^:/]+):\d+$\", val)
+        if m:
+            val = m.group(1)
+
+    if not val:
+        sys.exit(0)
+
+    try:
+        ipaddress.ip_address(val)
+        print(val)
+        sys.exit(0)
+    except ValueError:
+        pass
+
+    if \".\" in val and len(val) <= 253:
+        labels = val.split(\".\")
+        if len(labels) >= 2:
+            valid = True
+            for l in labels:
+                if not l or len(l) > 63 or not re.match(r\"^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$\", l):
+                    valid = False
+                    break
+            tld = labels[-1]
+            if re.match(r\"^[0-9]+$\", tld):
+                valid = False
+            if valid:
+                print(val)
+                sys.exit(0)
+except Exception:
+    pass
+sys.exit(0)
+" "$val"
+}
+
 # 2. 交互式输入基础参数 (前置智能扫描本机已有证书与域名)
 echo -e "\n${YELLOW}--- [参数输入] ---${PLAIN}"
 
@@ -122,21 +169,54 @@ if [ ${#DOMAIN_LIST[@]} -gt 0 ]; then
 
     if [ ${#DOMAIN_LIST[@]} -eq 1 ]; then
         echo -e "${GREEN}[证书发现] 检测到本机已有可用证书域名: ${CYAN}${FIRST_SUGG}${PLAIN}"
-        read -p "1. 节点绑定的域名或公网 IP [默认: ${FIRST_SUGG} (回车直接确认)]: " INPUT_DOMAIN
-        DOMAIN=${INPUT_DOMAIN:-$FIRST_SUGG}
+        while true; do
+            read -p "1. 节点绑定的域名或公网 IP [默认: ${FIRST_SUGG} (回车直接确认)]: " INPUT_DOMAIN
+            INPUT_DOMAIN=${INPUT_DOMAIN:-$FIRST_SUGG}
+            VALID_DOMAIN=$(validate_domain_or_ip "$INPUT_DOMAIN")
+            if [ -n "$VALID_DOMAIN" ]; then
+                DOMAIN="$VALID_DOMAIN"
+                break
+            else
+                echo -e "${RED}[错误] 域名或 IP 格式无效 ('$INPUT_DOMAIN')！${PLAIN}"
+                echo -e "${YELLOW}提示: 请输入合法的标准域名 (如 node.example.com) 或公网 IP (如 1.2.3.4)，不能为纯数字或乱码。${PLAIN}"
+            fi
+        done
     else
         echo -e "${GREEN}[证书发现] 检测到本机已有可用证书域名：${PLAIN}"
         for i in "${!DOMAIN_LIST[@]}"; do
             echo -e "  $((i+1))) ${CYAN}${DOMAIN_LIST[$i]}${PLAIN}"
         done
         echo -e "  $(( ${#DOMAIN_LIST[@]} + 1 ))) 手动输入其他域名或公网 IP"
-        read -p "请选择域名序号 [默认 1: ${FIRST_SUGG}]: " D_CHOICE
-        D_CHOICE=${D_CHOICE:-1}
-        if [[ "$D_CHOICE" =~ ^[0-9]+$ ]] && [ "$D_CHOICE" -ge 1 ] && [ "$D_CHOICE" -le "${#DOMAIN_LIST[@]}" ]; then
-            DOMAIN="${DOMAIN_LIST[$((D_CHOICE-1))]}"
-        else
-            read -p "1. 节点绑定的域名或公网 IP: " DOMAIN
-        fi
+        while true; do
+            read -p "请选择域名序号 [默认 1: ${FIRST_SUGG}]: " D_CHOICE
+            D_CHOICE=${D_CHOICE:-1}
+            if [[ "$D_CHOICE" =~ ^[0-9]+$ ]] && [ "$D_CHOICE" -ge 1 ] && [ "$D_CHOICE" -le "${#DOMAIN_LIST[@]}" ]; then
+                DOMAIN="${DOMAIN_LIST[$((D_CHOICE-1))]}"
+                break
+            elif [[ "$D_CHOICE" =~ ^[0-9]+$ ]] && [ "$D_CHOICE" -eq "$(( ${#DOMAIN_LIST[@]} + 1 ))" ]; then
+                while true; do
+                    read -p "1. 节点绑定的域名或公网 IP: " INPUT_DOMAIN
+                    VALID_DOMAIN=$(validate_domain_or_ip "$INPUT_DOMAIN")
+                    if [ -n "$VALID_DOMAIN" ]; then
+                        DOMAIN="$VALID_DOMAIN"
+                        break
+                    else
+                        echo -e "${RED}[错误] 域名或 IP 格式无效 ('$INPUT_DOMAIN')！${PLAIN}"
+                        echo -e "${YELLOW}提示: 请输入合法的标准域名 (如 node.example.com) 或公网 IP (如 1.2.3.4)，不能为纯数字或乱码。${PLAIN}"
+                    fi
+                done
+                break
+            else
+                # 检查用户是否直接输入/粘贴了合法的域名或 IP (而不是输入序号)
+                VALID_DOMAIN=$(validate_domain_or_ip "$D_CHOICE")
+                if [ -n "$VALID_DOMAIN" ]; then
+                    DOMAIN="$VALID_DOMAIN"
+                    break
+                else
+                    echo -e "${RED}[错误] 输入无效 ('$D_CHOICE')！请输入 1 至 $(( ${#DOMAIN_LIST[@]} + 1 )) 之间的序号，或直接输入合法的域名/公网 IP。${PLAIN}"
+                fi
+            fi
+        done
     fi
 
     # 拼写防呆拦截：
@@ -174,7 +254,17 @@ print(sum(1 for a, b in zip(s1, s2) if a != b))
         done
     fi
 else
-    read -p "1. 节点绑定的域名或公网 IP (例如 node.example.com 或 1.2.3.4): " DOMAIN
+    while true; do
+        read -p "1. 节点绑定的域名或公网 IP (例如 node.example.com 或 1.2.3.4): " INPUT_DOMAIN
+        VALID_DOMAIN=$(validate_domain_or_ip "$INPUT_DOMAIN")
+        if [ -n "$VALID_DOMAIN" ]; then
+            DOMAIN="$VALID_DOMAIN"
+            break
+        else
+            echo -e "${RED}[错误] 域名或 IP 格式无效 ('$INPUT_DOMAIN')！${PLAIN}"
+            echo -e "${YELLOW}提示: 请输入合法的标准域名 (如 node.example.com) 或公网 IP (如 1.2.3.4)，不能为纯数字或乱码。${PLAIN}"
+        fi
+    done
 fi
 
 if [ -z "$DOMAIN" ]; then
@@ -182,26 +272,30 @@ if [ -z "$DOMAIN" ]; then
     exit 1
 fi
 
-read -p "2. 3X-UI 入站端口 (例如 60231): " XUI_PORT
-if [ -z "$XUI_PORT" ]; then
-    echo -e "${RED}[错误] 3X-UI 入站端口不能为空！${PLAIN}"
-    exit 1
-fi
-
-# 确认该入站是否存在
-INBOUND_EXISTS=$(python3 -c "
+while true; do
+    read -p "2. 3X-UI 入站端口 (例如 60231): " XUI_PORT
+    if ! [[ "$XUI_PORT" =~ ^[0-9]+$ ]] || [ "$XUI_PORT" -lt 1 ] || [ "$XUI_PORT" -gt 65535 ]; then
+        echo -e "${RED}[错误] 端口号必须是 1~65535 之间的有效数字！${PLAIN}"
+        continue
+    fi
+    INBOUND_EXISTS=$(python3 -c "
 import sqlite3
-conn = sqlite3.connect('$XUI_DB')
-c = conn.cursor()
-c.execute('SELECT id FROM inbounds WHERE port = ?', ($XUI_PORT,))
-print('1' if c.fetchone() else '0')
-conn.close()
+try:
+    conn = sqlite3.connect('$XUI_DB')
+    c = conn.cursor()
+    c.execute('SELECT id FROM inbounds WHERE port = ?', ($XUI_PORT,))
+    print('1' if c.fetchone() else '0')
+    conn.close()
+except Exception:
+    print('0')
 ")
-
-if [ "$INBOUND_EXISTS" != "1" ]; then
-    echo -e "${RED}[错误] 3X-UI 数据库中未找到监听端口为 ${XUI_PORT} 的入站，请先去 3X-UI 面板创建该入站！${PLAIN}"
-    exit 1
-fi
+    if [ "$INBOUND_EXISTS" = "1" ]; then
+        break
+    else
+        echo -e "${RED}[错误] 3X-UI 数据库中未找到监听端口为 ${XUI_PORT} 的入站！${PLAIN}"
+        echo -e "${YELLOW}提示: 请检查端口是否输错，或先在 3X-UI 面板创建该入站。${PLAIN}"
+    fi
+done
 
 # 自动读取该入站的协议、TLS 状态与已有证书信息，及是否配置自定义分享地址
 INBOUND_INFO=$(python3 - << PYEOF
@@ -267,8 +361,15 @@ if [ -n "$INBOUND_SHARE_ADDR" ] && [ "$INBOUND_SHARE_ADDR" != "$DOMAIN" ]; then
     echo -e "${GREEN}          (后续将自动保留为客户端连接地址，反代域名作为 SNI/Host)${PLAIN}"
 fi
 
-read -p "3. 对外自定义映射端口 [默认: 443]: " EXTERNAL_PORT
-EXTERNAL_PORT=${EXTERNAL_PORT:-443}
+while true; do
+    read -p "3. 对外自定义映射端口 [默认: 443]: " EXTERNAL_PORT
+    EXTERNAL_PORT=${EXTERNAL_PORT:-443}
+    if [[ "$EXTERNAL_PORT" =~ ^[0-9]+$ ]] && [ "$EXTERNAL_PORT" -ge 1 ] && [ "$EXTERNAL_PORT" -le 65535 ]; then
+        break
+    else
+        echo -e "${RED}[错误] 对外端口必须是 1~65535 之间的有效数字！${PLAIN}"
+    fi
+done
 
 # 2.5 端口物理占用前置检测 (检查 443/指定对外端口 是否被非 Nginx/Caddy 的服务占用)
 while true; do
@@ -477,8 +578,15 @@ PYEOF
 
             case "$XUI_PORT_CHOICE" in
                 1)
-                    read -p "请输入该冲突入站的新端口 [默认: ${SUGG_FREE_PORT}]: " INPUT_NEW_PORT
-                    NEW_PORT=${INPUT_NEW_PORT:-$SUGG_FREE_PORT}
+                    while true; do
+                        read -p "请输入该冲突入站的新端口 [默认: ${SUGG_FREE_PORT}]: " INPUT_NEW_PORT
+                        NEW_PORT=${INPUT_NEW_PORT:-$SUGG_FREE_PORT}
+                        if [[ "$NEW_PORT" =~ ^[0-9]+$ ]] && [ "$NEW_PORT" -ge 1 ] && [ "$NEW_PORT" -le 65535 ]; then
+                            break
+                        else
+                            echo -e "${RED}[错误] 端口号必须是 1~65535 之间的有效数字！${PLAIN}"
+                        fi
+                    done
 
                     # 校验用户输入的端口是否处于 iptables 端口跳跃区间 (如 Hy2)
                     PORT_WARN=$(python3 -c "
@@ -519,8 +627,16 @@ PYEOF
                     continue
                     ;;
                 2)
-                    read -p "请输入新的对外映射端口 [例如 8443]: " EXTERNAL_PORT
-                    EXTERNAL_PORT=${EXTERNAL_PORT:-8443}
+                    while true; do
+                        read -p "请输入新的对外映射端口 [例如 8443]: " INPUT_EXT_PORT
+                        INPUT_EXT_PORT=${INPUT_EXT_PORT:-8443}
+                        if [[ "$INPUT_EXT_PORT" =~ ^[0-9]+$ ]] && [ "$INPUT_EXT_PORT" -ge 1 ] && [ "$INPUT_EXT_PORT" -le 65535 ]; then
+                            EXTERNAL_PORT=$INPUT_EXT_PORT
+                            break
+                        else
+                            echo -e "${RED}[错误] 端口号必须是 1~65535 之间的有效数字！${PLAIN}"
+                        fi
+                    done
                     continue
                     ;;
                 *)
@@ -558,8 +674,16 @@ PYEOF
 
             case "$PORT_CHOICE" in
                 1)
-                    read -p "请输入新的对外映射端口 [例如 8443]: " EXTERNAL_PORT
-                    EXTERNAL_PORT=${EXTERNAL_PORT:-8443}
+                    while true; do
+                        read -p "请输入新的对外映射端口 [例如 8443]: " INPUT_EXT_PORT
+                        INPUT_EXT_PORT=${INPUT_EXT_PORT:-8443}
+                        if [[ "$INPUT_EXT_PORT" =~ ^[0-9]+$ ]] && [ "$INPUT_EXT_PORT" -ge 1 ] && [ "$INPUT_EXT_PORT" -le 65535 ]; then
+                            EXTERNAL_PORT=$INPUT_EXT_PORT
+                            break
+                        else
+                            echo -e "${RED}[错误] 端口号必须是 1~65535 之间的有效数字！${PLAIN}"
+                        fi
+                    done
                     continue
                     ;;
                 2)
