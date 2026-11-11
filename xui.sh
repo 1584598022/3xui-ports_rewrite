@@ -1425,6 +1425,7 @@ PYEOF
         echo -e "${CYAN}[提示] 检测到现有配置文件: ${TARGET_CONF}，正在更新/追加分流规则...${PLAIN}"
         python3 - << PYEOF
 import re
+import os
 
 with open("$TARGET_CONF", "r") as f:
     content = f.read()
@@ -1457,6 +1458,17 @@ idx = content.rfind("}")
 if idx != -1:
     content = content[:idx] + "\n" + loc_block + "\n" + content[idx:]
 
+# 若系统支持 IPv6 且现有配置缺少 [::]:port 监听，则自动补全以支持 IPv6 及双栈
+if os.path.exists("/proc/net/if_inet6"):
+    def add_v6_listen(match):
+        full = match.group(0)
+        port = match.group(1)
+        flags = match.group(2) or ""
+        if f"[::]:{port}" in content:
+            return full
+        return f"{full}\n    listen [::]:{port}{flags};"
+    content = re.sub(r'^[ \t]*listen[ \t]+(?!\s*\[)(?:0\.0\.0\.0:)?(\d+)([^;\n]*);', add_v6_listen, content, flags=re.MULTILINE)
+
 with open("$TARGET_CONF", "w") as f:
     f.write(content)
 print("\033[0;32m[OK] 已成功更新已有配置中的分流规则！\033[0m")
@@ -1466,11 +1478,30 @@ PYEOF
         mkdir -p /etc/nginx/conf.d/
         mkdir -p /var/www/html
 
+        SSL_LISTEN_FLAGS="ssl http2"
+        SSL_CERT_DIRECTIVES="    ssl_certificate $CERT_FILE;
+    ssl_certificate_key $KEY_FILE;"
+        if [ -z "$CERT_FILE" ]; then
+            SSL_LISTEN_FLAGS=""
+            SSL_CERT_DIRECTIVES=""
+        fi
+
+        IPV6_LISTEN_80=""
+        IPV6_LISTEN_PORT=""
+        if [ -f /proc/net/if_inet6 ]; then
+            IPV6_LISTEN_80="
+    listen [::]:80;"
+            IPV6_FLAGS=""
+            [ -n "$SSL_LISTEN_FLAGS" ] && IPV6_FLAGS=" $SSL_LISTEN_FLAGS"
+            IPV6_LISTEN_PORT="
+    listen [::]:${EXTERNAL_PORT}${IPV6_FLAGS};"
+        fi
+
         HTTP_REDIRECT_BLOCK=""
         if [ "$EXTERNAL_PORT" = "443" ] && [ -n "$CERT_FILE" ]; then
             HTTP_REDIRECT_BLOCK="# 80 跳转 HTTPS
 server {
-    listen 80;
+    listen 80;$IPV6_LISTEN_80
     server_name $DOMAIN;
     location /.well-known/acme-challenge/ {
         root /var/www/html;
@@ -1481,20 +1512,15 @@ server {
 }"
         fi
 
-        SSL_LISTEN_FLAGS="ssl http2"
-        SSL_CERT_DIRECTIVES="    ssl_certificate $CERT_FILE;
-    ssl_certificate_key $KEY_FILE;"
-        if [ -z "$CERT_FILE" ]; then
-            SSL_LISTEN_FLAGS=""
-            SSL_CERT_DIRECTIVES=""
-        fi
+        LISTEN_FLAGS=""
+        [ -n "$SSL_LISTEN_FLAGS" ] && LISTEN_FLAGS=" $SSL_LISTEN_FLAGS"
 
         cat << NGINX_NEW_EOF > "$TARGET_CONF"
 $HTTP_REDIRECT_BLOCK
 
 # $EXTERNAL_PORT 核心配置
 server {
-    listen $EXTERNAL_PORT $SSL_LISTEN_FLAGS;
+    listen ${EXTERNAL_PORT}${LISTEN_FLAGS};$IPV6_LISTEN_PORT
     server_name $DOMAIN;
 
 $SSL_CERT_DIRECTIVES
